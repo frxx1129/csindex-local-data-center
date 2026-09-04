@@ -272,6 +272,7 @@ class Database:
 
     def create_or_get_scope(self, scope_id: str, codes: list[str]) -> CrawlScope:
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             existing = self._load_scope(connection, scope_id)
             if existing is not None:
                 return existing

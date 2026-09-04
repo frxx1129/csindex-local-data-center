@@ -1,5 +1,7 @@
 from pathlib import Path
 import sqlite3
+import threading
+import time
 
 from csindex_local.db import Database
 from csindex_local.models import IndexRecord, VolatilitySnapshot, YieldSnapshot
@@ -117,3 +119,46 @@ def test_recover_interrupted_tasks_requeues_running_rows(tmp_path: Path):
             "SELECT status FROM crawl_tasks WHERE run_id = ?", ("run-1",)
         ).fetchone()[0]
     assert status == "pending"
+
+
+def test_concurrent_first_scope_creation_returns_the_same_frozen_scope(tmp_path: Path):
+    path = tmp_path / "test.db"
+    first = Database(path)
+    second = Database(path)
+    first.initialize()
+    first.upsert_indices([make_index("000300"), make_index("000905")])
+
+    start = threading.Barrier(2)
+    results = []
+    errors = []
+
+    for database in (first, second):
+        original_load_scope = database._load_scope
+
+        def delayed_load_scope(connection, scope_id, original=original_load_scope):
+            scope = original(connection, scope_id)
+            if scope is None:
+                time.sleep(0.05)
+            return scope
+
+        database._load_scope = delayed_load_scope
+
+    def create_scope(database: Database, codes: list[str]) -> None:
+        try:
+            start.wait(timeout=2)
+            results.append(database.create_or_get_scope("fixed:1", codes))
+        except Exception as error:
+            errors.append(error)
+
+    first_thread = threading.Thread(target=create_scope, args=(first, ["000300"]))
+    second_thread = threading.Thread(target=create_scope, args=(second, ["000905"]))
+    first_thread.start()
+    second_thread.start()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    assert len(results) == 2
+    assert results[0] == results[1]
