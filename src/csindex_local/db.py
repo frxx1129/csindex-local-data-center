@@ -146,6 +146,12 @@ class Database:
                     FOREIGN KEY (run_id) REFERENCES crawl_runs(id),
                     FOREIGN KEY (index_code) REFERENCES indices(index_code)
                 );
+
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -270,25 +276,36 @@ class Database:
                 "SELECT * FROM indices WHERE index_code = ?", (index_code,)
             ).fetchone()
 
-    def create_or_get_scope(self, scope_id: str, codes: list[str]) -> CrawlScope:
+    def create_or_get_scope(
+        self, scope_id: str, codes: list[str], regenerate: bool = False
+    ) -> CrawlScope:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = self._load_scope(connection, scope_id)
-            if existing is not None:
+            if existing is not None and not regenerate:
                 return existing
 
             scope_type, separator, scope_value = scope_id.partition(":")
             if not separator:
                 scope_value = scope_id
             now = _utc_now()
-            connection.execute(
-                """
-                INSERT INTO crawl_scopes (
-                    id, name, scope_type, scope_value, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (scope_id, scope_id, scope_type, scope_value, now, now),
-            )
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO crawl_scopes (
+                        id, name, scope_type, scope_value, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (scope_id, scope_id, scope_type, scope_value, now, now),
+                )
+            else:
+                connection.execute(
+                    "UPDATE crawl_scopes SET updated_at = ? WHERE id = ?",
+                    (now, scope_id),
+                )
+                connection.execute(
+                    "DELETE FROM crawl_scope_members WHERE scope_id = ?", (scope_id,)
+                )
             connection.executemany(
                 """
                 INSERT INTO crawl_scope_members (
@@ -298,6 +315,36 @@ class Database:
                 [(scope_id, code, member_order, now) for member_order, code in enumerate(codes)],
             )
             return CrawlScope(scope_id, scope_id, scope_type, scope_value, tuple(codes))
+
+    def get_runtime_state(self, key: str) -> dict | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM runtime_state WHERE key = ?", (key,)
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["value_json"])
+        if not isinstance(value, dict):
+            raise ValueError(f"runtime state {key!r} must contain a JSON object")
+        return value
+
+    def set_runtime_state(self, key: str, value: dict) -> None:
+        payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_state (key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_at = excluded.updated_at
+                """,
+                (key, payload, _utc_now()),
+            )
+
+    def delete_runtime_state(self, key: str) -> None:
+        with self._connection() as connection:
+            connection.execute("DELETE FROM runtime_state WHERE key = ?", (key,))
 
     def recover_interrupted_tasks(self) -> int:
         with self._connection() as connection:

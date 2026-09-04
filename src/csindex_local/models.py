@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 
@@ -57,3 +58,29 @@ class RunProgress:
     success_tasks: int
     failed_tasks: int
     pending_tasks: int
+
+
+@dataclass(frozen=True)
+class ScopeSelection:
+    kind: str
+    value: int | tuple[str, ...]
+    regenerate: bool = False
+
+
+class UpdateMode(str, Enum):
+    MISSING = "missing"
+    UPDATE = "update"
+    FORCE = "force"
+
+
+@dataclass(frozen=True)
+class CrawlEvent:
+    """Immutable worker event safe to hand to CLI and GUI consumers."""
+
+    kind: str
+    run_id: str
+    progress: RunProgress
+    index_code: str | None = None
+    endpoint: str | None = None
+    message: str | None = None
+    available_at: str | None = None
