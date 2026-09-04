@@ -21,27 +21,15 @@ Sleep = Callable[[float], None]
 RandomUniform = Callable[[float, float], float]
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class CooldownState:
     """Immutable state needed to continue WAF escalation after a restart."""
 
     until: datetime
     next_cooldown_seconds: float
 
-    def __eq__(self, other: object) -> bool:
-        # Comparing equal to the old deadline-only value keeps callbacks that
-        # only recorded the prior API's datetime value source-compatible.
-        if isinstance(other, CooldownState):
-            return (
-                self.until == other.until
-                and self.next_cooldown_seconds == other.next_cooldown_seconds
-            )
-        if isinstance(other, datetime):
-            return self.until == other
-        return NotImplemented
-
-
-PersistCooldown = Callable[[CooldownState | None], None]
+PersistCooldown = Callable[[datetime | None], None]
+PersistCooldownState = Callable[[CooldownState | None], None]
 
 
 def _utc_now() -> datetime:
@@ -53,9 +41,10 @@ class RateLimiter:
 
     ``clock``, ``sleep`` and ``random_uniform`` are injectable so callers can
     test the policy without waiting in real time.  ``persist_cooldown`` is
-    called with a :class:`CooldownState` whenever the blocked deadline changes;
-    passing a state to the constructor restores a deadline and its escalation
-    level saved by an earlier process.
+    ``persist_cooldown`` retains the original ``datetime | None`` callback
+    contract.  ``persist_cooldown_state`` is the opt-in complete-state callback
+    for callers that need escalation to survive a process restart.  Passing a
+    state to the constructor restores a deadline and its escalation level.
     """
 
     def __init__(
@@ -65,6 +54,7 @@ class RateLimiter:
         sleep: Sleep = time.sleep,
         random_uniform: RandomUniform = random.uniform,
         persist_cooldown: PersistCooldown | None = None,
+        persist_cooldown_state: PersistCooldownState | None = None,
         cooldown_until: datetime | None = None,
         cooldown_state: CooldownState | datetime | None = None,
     ) -> None:
@@ -75,6 +65,7 @@ class RateLimiter:
         self._sleep = sleep
         self._random_uniform = random_uniform
         self._persist_cooldown = persist_cooldown
+        self._persist_cooldown_state = persist_cooldown_state
 
         self._request_count = 0
         self._next_request_at: datetime | None = None
@@ -156,7 +147,9 @@ class RateLimiter:
             float(self._config.blocked_max_cooldown_seconds),
         )
         if self._persist_cooldown is not None:
-            self._persist_cooldown(
+            self._persist_cooldown(self._blocked_until)
+        if self._persist_cooldown_state is not None:
+            self._persist_cooldown_state(
                 CooldownState(self._blocked_until, self._next_blocked_seconds)
             )
         return self._blocked_until
@@ -169,6 +162,8 @@ class RateLimiter:
         )
         if self._persist_cooldown is not None:
             self._persist_cooldown(None)
+        if self._persist_cooldown_state is not None:
+            self._persist_cooldown_state(None)
 
     @property
     def blocked_until(self) -> datetime | None:

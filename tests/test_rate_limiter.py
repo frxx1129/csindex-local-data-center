@@ -125,12 +125,12 @@ def test_cooldown_escalation_survives_restart_and_clear_resets_state(
     def save_state(state: object | None) -> None:
         persisted["state"] = state
 
-    instance_a = build_limiter(fake_clock, persist_cooldown=save_state)
+    instance_a = build_limiter(fake_clock, persist_cooldown_state=save_state)
     first = instance_a.enter_blocked_cooldown(fake_clock.now())
 
     instance_b = build_limiter(
         fake_clock,
-        persist_cooldown=save_state,
+        persist_cooldown_state=save_state,
         cooldown_state=persisted["state"],
     )
     fake_clock.advance_to(first)
@@ -141,9 +141,45 @@ def test_cooldown_escalation_survives_restart_and_clear_resets_state(
     instance_b.clear_blocked_cooldown()
     instance_c = build_limiter(
         fake_clock,
-        persist_cooldown=save_state,
+        persist_cooldown_state=save_state,
         cooldown_state=persisted["state"],
     )
     third = instance_c.enter_blocked_cooldown(fake_clock.now())
 
     assert (third - fake_clock.now()).total_seconds() == 1800
+
+
+def test_legacy_datetime_persistence_callback_keeps_datetime_contract(
+    fake_clock: FakeClock,
+) -> None:
+    persisted: list[str | None] = []
+
+    def save_datetime(value: datetime | None) -> None:
+        persisted.append(None if value is None else value.isoformat())
+
+    limiter = build_limiter(fake_clock, persist_cooldown=save_datetime)
+    first = limiter.enter_blocked_cooldown(fake_clock.now())
+    limiter.clear_blocked_cooldown()
+
+    assert persisted == [first.isoformat(), None]
+
+
+def test_clear_notifies_legacy_and_complete_state_callbacks(
+    fake_clock: FakeClock,
+) -> None:
+    legacy: list[datetime | None] = []
+    complete: list[object | None] = []
+    limiter = build_limiter(
+        fake_clock,
+        persist_cooldown=legacy.append,
+        persist_cooldown_state=complete.append,
+    )
+
+    first = limiter.enter_blocked_cooldown(fake_clock.now())
+    limiter.clear_blocked_cooldown()
+
+    assert legacy == [first, None]
+    assert complete[0] is not None
+    assert complete[0].until == first
+    assert complete[0].next_cooldown_seconds == 3600
+    assert complete[1] is None
