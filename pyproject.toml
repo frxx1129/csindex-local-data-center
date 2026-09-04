@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csindex-local"
+version = "0.1.0"
+description = "Local data center for China Securities Index data"
+requires-python = ">=3.12"
+
+[project.scripts]
+csindex-local = "csindex_local.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
