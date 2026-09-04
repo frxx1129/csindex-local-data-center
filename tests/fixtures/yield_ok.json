@@ -1,0 +1,13 @@
+{
+  "code": "200",
+  "data": {
+    "indexCode": "000300",
+    "endDate": "2026-09-03",
+    "oneMonth": "1.25",
+    "threeMonth": "--",
+    "thisYear": "3.5",
+    "oneYear": "4",
+    "threeYear": "5",
+    "fiveYear": "6"
+  }
+}
