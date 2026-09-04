@@ -183,3 +183,24 @@ def test_clear_notifies_legacy_and_complete_state_callbacks(
     assert complete[0].until == first
     assert complete[0].next_cooldown_seconds == 3600
     assert complete[1] is None
+
+
+def test_legacy_positional_cooldown_until_keeps_constructor_compatibility(
+    fake_clock: FakeClock,
+) -> None:
+    persisted: list[datetime | None] = []
+    cooldown_until = fake_clock.now() + timedelta(seconds=1800)
+
+    limiter = RateLimiter(
+        None,
+        fake_clock.now,
+        fake_clock.sleep,
+        lambda minimum, maximum: 7.5,
+        persisted.append,
+        cooldown_until,
+    )
+
+    assert limiter.blocked_until == cooldown_until
+    limiter.clear_blocked_cooldown()
+
+    assert persisted == [None]

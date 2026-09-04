@@ -54,9 +54,10 @@ class RateLimiter:
         sleep: Sleep = time.sleep,
         random_uniform: RandomUniform = random.uniform,
         persist_cooldown: PersistCooldown | None = None,
-        persist_cooldown_state: PersistCooldownState | None = None,
         cooldown_until: datetime | None = None,
         cooldown_state: CooldownState | datetime | None = None,
+        *,
+        persist_cooldown_state: PersistCooldownState | None = None,
     ) -> None:
         if cooldown_until is not None and cooldown_state is not None:
             raise ValueError("pass cooldown_until or cooldown_state, not both")
