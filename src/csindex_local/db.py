@@ -32,7 +32,6 @@ class Database:
     def _connection(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
         try:
@@ -47,6 +46,7 @@ class Database:
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS indices (
@@ -301,13 +301,14 @@ class Database:
 
     def recover_interrupted_tasks(self) -> int:
         with self._connection() as connection:
+            now = _utc_now()
             cursor = connection.execute(
                 """
                 UPDATE crawl_tasks
-                SET status = 'pending', updated_at = ?
+                SET status = 'pending', available_at = ?, updated_at = ?
                 WHERE status = 'running'
                 """,
-                (_utc_now(),),
+                (now, now),
             )
             return cursor.rowcount
 

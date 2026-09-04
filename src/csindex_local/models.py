@@ -38,3 +38,22 @@ class CrawlScope:
     scope_type: str
     scope_value: str
     codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CrawlTask:
+    id: int
+    run_id: str
+    index_code: str
+    endpoint: str
+    target_data_date: str | None
+    status: str
+    attempts: int
+
+
+@dataclass(frozen=True)
+class RunProgress:
+    total_tasks: int
+    success_tasks: int
+    failed_tasks: int
+    pending_tasks: int
