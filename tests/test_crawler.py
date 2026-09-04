@@ -56,6 +56,7 @@ class FakeClient:
             make_index("000852", "中证1000"),
         ]
         self.calls: list[tuple[str, str | None]] = []
+        self.volatility_requests: list[tuple[str, str]] = []
         self.responses: dict[tuple[str, str], list[object]] = {}
 
     def queue(self, endpoint: str, code: str, *responses: object) -> None:
@@ -72,6 +73,7 @@ class FakeClient:
 
     def fetch_volatility(self, code: str, data_date: str) -> VolatilitySnapshot:
         self.calls.append(("volatility", code))
+        self.volatility_requests.append((code, data_date))
         default = VolatilitySnapshot(code, data_date, 7, 8, 9)
         return self._next("volatility", code, default)
 
@@ -422,6 +424,33 @@ def test_date_mismatch_binds_volatility_to_actual_yield_date_and_continues(
     assert progress.failed_tasks == 2
 
 
+def test_existing_target_volatility_is_not_satisfied_by_wrong_date_yield(
+    fake_client: FakeClient,
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    database.upsert_indices(fake_client.indices)
+    database.merge_volatility(VolatilitySnapshot("000905", TARGET_DATE, 7, 8, 9))
+    fake_client.queue(
+        "yield", "000905", YieldSnapshot("000905", "2026-09-02", 1, 2, 3, 4, 5, 6)
+    )
+    crawler = build_crawler(fake_client, database, fast_limiter, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.UPDATE
+    )
+
+    progress = crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    target = database.get_snapshot("000905", TARGET_DATE)
+    actual = database.get_snapshot("000905", "2026-09-02")
+    assert progress.success_tasks == 0
+    assert progress.failed_tasks == 2
+    assert target["yield_fetched_at"] is None
+    assert actual["is_complete"] == 1
+    assert fake_client.volatility_requests == [("000905", "2026-09-02")]
+
+
 def test_cooldown_survives_restart_and_successful_probe_resets_escalation(
     fake_client: FakeClient,
     database: Database,
@@ -712,6 +741,33 @@ def test_second_concurrent_run_cannot_start_another_detail_request(
     assert client.calls.count(("yield", "000852")) == 0
     assert second_result[0].pending_tasks == 2
     assert not first_worker.is_alive()
+
+
+def test_preconstructed_crawler_refreshes_cooldown_after_acquiring_worker_lock(
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    first_client = FakeClient()
+    second_client = FakeClient()
+    first = build_persistent_crawler(first_client, database, fake_clock)
+    second = build_persistent_crawler(second_client, database, fake_clock)
+    first_client.queue("yield", "000905", BlockedError("blocked later"))
+    first_run = first.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    second_run = second.prepare_run(
+        ScopeSelection("codes", ("000852",)), UpdateMode.FORCE
+    )
+
+    first.run(first_run, CrawlControl(), lambda event: None)
+    second.run(second_run, CrawlControl(), lambda event: None)
+
+    assert fake_clock.sleeps == [1800]
+    assert second_client.calls.count(("yield", "000300")) == 2
+    assert second_client.calls.index(("yield", "000300"), 2) < second_client.calls.index(
+        ("yield", "000852")
+    )
+    assert database.get_runtime_state("waf_cooldown") is None
 
 
 def test_events_have_stable_frozen_shape(

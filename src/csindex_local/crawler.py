@@ -116,6 +116,7 @@ class Crawler:
         }
 
         with _DETAIL_WORKER_LOCK:
+            self._sync_cooldown_state()
             probe = self._fetch_probe()
 
         frozen_scope = self._resolve_scope(scope, indices)
@@ -164,6 +165,7 @@ class Crawler:
         if not _DETAIL_WORKER_LOCK.acquire(blocking=False):
             return self._finish_run(run_id, "waiting", on_event)
         try:
+            self._sync_cooldown_state()
             return self._run_exclusive(run_id, control, on_event)
         finally:
             _DETAIL_WORKER_LOCK.release()
@@ -211,6 +213,7 @@ class Crawler:
         if not _DETAIL_WORKER_LOCK.acquire(blocking=False):
             return self._queue.progress(run_id)
         try:
+            self._sync_cooldown_state()
             if self._limiter.blocked_until is not None:
                 try:
                     self._fetch_probe()
@@ -427,9 +430,14 @@ class Crawler:
 
     def _is_satisfied(self, task: CrawlTask) -> bool:
         state = self._run_state(task.run_id)
-        return _endpoint_key(task.index_code, task.endpoint) in state.get(
+        if _endpoint_key(task.index_code, task.endpoint) not in state.get(
             "satisfied", []
-        )
+        ):
+            return False
+        if task.endpoint != "volatility":
+            return True
+        yield_date = state.get("yield_dates", {}).get(task.index_code)
+        return bool(yield_date and yield_date == state.get("target_date"))
 
     def _yield_date(self, task: CrawlTask) -> str | None:
         value = self._run_state(task.run_id).get("yield_dates", {}).get(
@@ -472,6 +480,11 @@ class Crawler:
                 "next_cooldown_seconds": state.next_cooldown_seconds,
             },
         )
+
+    def _sync_cooldown_state(self) -> None:
+        restore = getattr(self._limiter, "restore_cooldown_state", None)
+        if callable(restore):
+            restore(self._load_cooldown_state())
 
     def _now(self) -> datetime:
         clock = self._clock

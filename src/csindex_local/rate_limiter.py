@@ -171,6 +171,24 @@ class RateLimiter:
         """Return the currently persisted/active WAF deadline, if any."""
         return self._blocked_until
 
+    def restore_cooldown_state(self, state: CooldownState | None) -> None:
+        """Replace local WAF state from the authoritative persistent store.
+
+        This deliberately does not invoke persistence callbacks: callers use it
+        to refresh a preconstructed limiter after acquiring the global request
+        worker lock.
+        """
+        if state is None:
+            self._blocked_until = None
+            self._next_blocked_seconds = float(
+                self._config.blocked_initial_cooldown_seconds
+            )
+            return
+        if not isinstance(state, CooldownState):
+            raise TypeError("state must be CooldownState or None")
+        self._blocked_until = self._as_aware(state.until)
+        self._next_blocked_seconds = float(state.next_cooldown_seconds)
+
     def _now(self) -> datetime:
         clock = self._clock
         value = clock.now() if hasattr(clock, "now") else clock()  # type: ignore[operator]
