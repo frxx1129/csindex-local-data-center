@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import random
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from .config import AppConfig
@@ -18,7 +19,29 @@ from .config import AppConfig
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], None]
 RandomUniform = Callable[[float, float], float]
-PersistCooldown = Callable[[datetime | None], None]
+
+
+@dataclass(frozen=True, eq=False)
+class CooldownState:
+    """Immutable state needed to continue WAF escalation after a restart."""
+
+    until: datetime
+    next_cooldown_seconds: float
+
+    def __eq__(self, other: object) -> bool:
+        # Comparing equal to the old deadline-only value keeps callbacks that
+        # only recorded the prior API's datetime value source-compatible.
+        if isinstance(other, CooldownState):
+            return (
+                self.until == other.until
+                and self.next_cooldown_seconds == other.next_cooldown_seconds
+            )
+        if isinstance(other, datetime):
+            return self.until == other
+        return NotImplemented
+
+
+PersistCooldown = Callable[[CooldownState | None], None]
 
 
 def _utc_now() -> datetime:
@@ -30,8 +53,9 @@ class RateLimiter:
 
     ``clock``, ``sleep`` and ``random_uniform`` are injectable so callers can
     test the policy without waiting in real time.  ``persist_cooldown`` is
-    called whenever the blocked deadline changes; passing a deadline to the
-    constructor restores a deadline saved by an earlier process.
+    called with a :class:`CooldownState` whenever the blocked deadline changes;
+    passing a state to the constructor restores a deadline and its escalation
+    level saved by an earlier process.
     """
 
     def __init__(
@@ -42,7 +66,10 @@ class RateLimiter:
         random_uniform: RandomUniform = random.uniform,
         persist_cooldown: PersistCooldown | None = None,
         cooldown_until: datetime | None = None,
+        cooldown_state: CooldownState | datetime | None = None,
     ) -> None:
+        if cooldown_until is not None and cooldown_state is not None:
+            raise ValueError("pass cooldown_until or cooldown_state, not both")
         self._config = config or AppConfig(data_dir="", export_dir="")
         self._clock = clock if clock is not None else _utc_now
         self._sleep = sleep
@@ -52,12 +79,20 @@ class RateLimiter:
         self._request_count = 0
         self._next_request_at: datetime | None = None
         self._batch_rest_until: datetime | None = None
-        self._blocked_until = (
-            self._as_aware(cooldown_until) if cooldown_until is not None else None
-        )
         self._next_blocked_seconds = float(
             self._config.blocked_initial_cooldown_seconds
         )
+        if isinstance(cooldown_state, CooldownState):
+            self._blocked_until = self._as_aware(cooldown_state.until)
+            self._next_blocked_seconds = float(cooldown_state.next_cooldown_seconds)
+        elif isinstance(cooldown_state, datetime):
+            self._blocked_until = self._as_aware(cooldown_state)
+        elif cooldown_state is None:
+            self._blocked_until = (
+                self._as_aware(cooldown_until) if cooldown_until is not None else None
+            )
+        else:
+            raise TypeError("cooldown_state must be CooldownState or datetime")
 
     def before_request(self) -> None:
         """Wait until a request is allowed by all active timing rules."""
@@ -121,7 +156,9 @@ class RateLimiter:
             float(self._config.blocked_max_cooldown_seconds),
         )
         if self._persist_cooldown is not None:
-            self._persist_cooldown(self._blocked_until)
+            self._persist_cooldown(
+                CooldownState(self._blocked_until, self._next_blocked_seconds)
+            )
         return self._blocked_until
 
     def clear_blocked_cooldown(self) -> None:

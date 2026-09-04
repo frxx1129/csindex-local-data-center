@@ -115,3 +115,35 @@ def test_clear_blocked_cooldown_allows_request_without_waiting(
     limiter.before_request()
 
     assert fake_clock.sleeps == []
+
+
+def test_cooldown_escalation_survives_restart_and_clear_resets_state(
+    fake_clock: FakeClock,
+) -> None:
+    persisted: dict[str, object | None] = {"state": None}
+
+    def save_state(state: object | None) -> None:
+        persisted["state"] = state
+
+    instance_a = build_limiter(fake_clock, persist_cooldown=save_state)
+    first = instance_a.enter_blocked_cooldown(fake_clock.now())
+
+    instance_b = build_limiter(
+        fake_clock,
+        persist_cooldown=save_state,
+        cooldown_state=persisted["state"],
+    )
+    fake_clock.advance_to(first)
+    second = instance_b.enter_blocked_cooldown(fake_clock.now())
+
+    assert (second - fake_clock.now()).total_seconds() == 3600
+
+    instance_b.clear_blocked_cooldown()
+    instance_c = build_limiter(
+        fake_clock,
+        persist_cooldown=save_state,
+        cooldown_state=persisted["state"],
+    )
+    third = instance_c.enter_blocked_cooldown(fake_clock.now())
+
+    assert (third - fake_clock.now()).total_seconds() == 1800
