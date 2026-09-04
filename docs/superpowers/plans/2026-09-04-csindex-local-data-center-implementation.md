@@ -516,6 +516,8 @@ git commit -m "feat: enforce global rate and waf cooldown"
 ### Task 6: 抓取协调器与增量更新
 
 **Files:**
+- Modify: `src/csindex_local/db.py`
+- Modify: `src/csindex_local/models.py`
 - Create: `src/csindex_local/crawler.py`
 - Create: `tests/test_crawler.py`
 
@@ -524,6 +526,9 @@ git commit -m "feat: enforce global rate and waf cooldown"
 - Produces: `Crawler.prepare_run(scope: ScopeSelection, mode: UpdateMode) -> str`
 - Produces: `Crawler.run(run_id: str, control: CrawlControl, on_event: Callable) -> RunProgress`
 - Produces: `CrawlControl.pause/resume/stop`
+- Produces: `Database.get_runtime_state(key: str) -> dict | None`
+- Produces: `Database.set_runtime_state(key: str, value: dict) -> None`
+- Produces: `Database.delete_runtime_state(key: str) -> None`
 
 在 `models.py` 中增加明确的公共类型：
 

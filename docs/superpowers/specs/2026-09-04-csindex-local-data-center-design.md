@@ -198,6 +198,14 @@ GUI / CLI
 
 程序启动时，将上次异常退出遗留的 `running` 任务恢复为 `pending`。
 
+### 7.8 `runtime_state`
+
+- `key TEXT PRIMARY KEY`
+- `value_json TEXT NOT NULL`
+- `updated_at TEXT NOT NULL`
+
+保存需要跨进程恢复的少量运行状态。首版至少保存 WAF 冷却截止时间和下一次冷却时长；写入使用 UPSERT，清除冷却时删除对应键。该表不保存用户的指数指标数据。
+
 ## 8. 抓取流程
 
 ### 8.1 启动检查
