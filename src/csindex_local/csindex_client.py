@@ -75,11 +75,15 @@ class CsindexClient:
                 raise ResponseFormatError("index list total changed during pagination")
 
             if not page_rows:
+                if len(rows) < total:
+                    raise ResponseFormatError("index list ended before total")
                 break
             rows.extend(page_rows)
+            if len(rows) > total:
+                raise ResponseFormatError("index list has more rows than total")
             page_num += 1
 
-        return rows[:total] if total is not None else rows
+        return rows
 
     def fetch_yield(self, code: str) -> YieldSnapshot:
         safe_code = self._validate_code(code)

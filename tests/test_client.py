@@ -100,6 +100,51 @@ def test_fetch_index_list_posts_paginated_request_and_preserves_raw(monkeypatch)
     )
 
 
+def test_fetch_index_list_rejects_empty_page_before_reported_total(monkeypatch):
+    """An empty middle page means the reported index list is incomplete."""
+    responses = [
+        {
+            "total": 2,
+            "data": [
+                {
+                    "indexCode": "000300",
+                    "indexName": "沪深300",
+                    "ifTracked": "是",
+                }
+            ],
+        },
+        {"total": 2, "data": []},
+    ]
+
+    monkeypatch.setattr(
+        "csindex_local.csindex_client.urlopen",
+        lambda request, timeout: FakeResponse(
+            json.dumps(responses.pop(0)).encode("utf-8")
+        ),
+    )
+
+    with pytest.raises(ResponseFormatError, match="ended before total"):
+        CsindexClient(base_url="https://example.test").fetch_index_list()
+
+
+def test_fetch_index_list_rejects_more_rows_than_reported_total(monkeypatch):
+    """Truncating an overfull page would hide an inconsistent server response."""
+    payload = {
+        "total": 1,
+        "data": [
+            {"indexCode": "000300", "indexName": "沪深300", "ifTracked": "是"},
+            {"indexCode": "000905", "indexName": "中证500", "ifTracked": "是"},
+        ],
+    }
+    monkeypatch.setattr(
+        "csindex_local.csindex_client.urlopen",
+        lambda request, timeout: FakeResponse(json.dumps(payload).encode("utf-8")),
+    )
+
+    with pytest.raises(ResponseFormatError, match="more rows than total"):
+        CsindexClient(base_url="https://example.test").fetch_index_list()
+
+
 def test_fetch_yield_uses_code_specific_endpoint_and_referer(monkeypatch):
     """A generic Referer or wrong endpoint can trigger an avoidable WAF block."""
     payload = (FIXTURES / "yield_ok.json").read_bytes()
