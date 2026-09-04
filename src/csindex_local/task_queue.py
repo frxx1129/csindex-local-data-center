@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Callable, Iterable
 from uuid import uuid4
 
 from csindex_local.db import Database
@@ -12,8 +12,13 @@ _CLAIMABLE_STATUSES = ("pending", "retry_wait", "blocked_wait")
 
 
 class TaskQueue:
-    def __init__(self, database: Database):
+    def __init__(
+        self,
+        database: Database,
+        clock: Callable[[], datetime] | object | None = None,
+    ):
         self._database = database
+        self._clock = clock
 
     def create_run(
         self,
@@ -24,7 +29,7 @@ class TaskQueue:
     ) -> str:
         run_id = str(uuid4())
         unique_codes = tuple(dict.fromkeys(codes))
-        now = _utc_now()
+        now = self._now()
         with self._database._connection() as connection:
             connection.execute(
                 """
@@ -51,7 +56,7 @@ class TaskQueue:
         return run_id
 
     def claim_next(self, run_id: str) -> CrawlTask | None:
-        now = _utc_now()
+        now = self._now()
         with self._database._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = connection.execute(
@@ -88,7 +93,7 @@ class TaskQueue:
                 SET status = 'success', updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
-                (_utc_now(), task_id),
+                (self._now(), task_id),
             )
             if updated.rowcount:
                 connection.execute(
@@ -109,7 +114,7 @@ class TaskQueue:
                     last_http_status = NULL, updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
-                (_as_timestamp(available_at), error, _utc_now(), task_id),
+                (_as_timestamp(available_at), error, self._now(), task_id),
             )
 
     def mark_blocked(
@@ -123,7 +128,7 @@ class TaskQueue:
                     last_error = NULL, updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
-                (_as_timestamp(available_at), status, _utc_now(), task_id),
+                (_as_timestamp(available_at), status, self._now(), task_id),
             )
 
     def mark_failed(self, task_id: int, error: str) -> None:
@@ -134,7 +139,7 @@ class TaskQueue:
                 SET status = 'failed', last_error = ?, updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
-                (error, _utc_now(), task_id),
+                (error, self._now(), task_id),
             )
             if updated.rowcount:
                 connection.execute(
@@ -145,6 +150,48 @@ class TaskQueue:
                     """,
                     (task_id,),
                 )
+
+    def bind_volatility_date(
+        self, run_id: str, index_code: str, data_date: str
+    ) -> None:
+        with self._database._connection() as connection:
+            connection.execute(
+                """
+                UPDATE crawl_tasks
+                SET target_data_date = ?, updated_at = ?
+                WHERE run_id = ? AND index_code = ? AND endpoint = 'volatility'
+                  AND status IN ('pending', 'retry_wait', 'blocked_wait')
+                """,
+                (data_date, self._now(), run_id, index_code),
+            )
+
+    def release_unrequested(self, task_id: int) -> bool:
+        """Return a claimed task to pending when no HTTP request was sent."""
+        now = self._now()
+        with self._database._connection() as connection:
+            updated = connection.execute(
+                """
+                UPDATE crawl_tasks
+                SET status = 'pending', attempts = MAX(attempts - 1, 0),
+                    available_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (now, now, task_id),
+            )
+            return bool(updated.rowcount)
+
+    def endpoint_status(
+        self, run_id: str, index_code: str, endpoint: str
+    ) -> str | None:
+        with self._database._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT status FROM crawl_tasks
+                WHERE run_id = ? AND index_code = ? AND endpoint = ?
+                """,
+                (run_id, index_code, endpoint),
+            ).fetchone()
+        return None if row is None else str(row["status"])
 
     def progress(self, run_id: str) -> RunProgress:
         with self._database._connection() as connection:
@@ -170,6 +217,18 @@ class TaskQueue:
 
     def recover_interrupted(self) -> int:
         return self._database.recover_interrupted_tasks()
+
+    def update_run_state(self, run_id: str, status: str) -> RunProgress:
+        finished_at = None if status == "waiting" else self._now()
+        return self._database.update_run_state(run_id, status, finished_at)
+
+    def _now(self) -> str:
+        if self._clock is None:
+            return _utc_now()
+        clock = self._clock
+        value = clock.now() if hasattr(clock, "now") else clock()
+        return _as_timestamp(value)
+
 
 def _to_task(row: object) -> CrawlTask:
     return CrawlTask(

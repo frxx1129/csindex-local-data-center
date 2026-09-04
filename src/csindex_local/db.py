@@ -7,7 +7,13 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-from csindex_local.models import CrawlScope, IndexRecord, VolatilitySnapshot, YieldSnapshot
+from csindex_local.models import (
+    CrawlScope,
+    IndexRecord,
+    RunProgress,
+    VolatilitySnapshot,
+    YieldSnapshot,
+)
 
 
 _METRIC_COLUMNS = (
@@ -345,6 +351,52 @@ class Database:
     def delete_runtime_state(self, key: str) -> None:
         with self._connection() as connection:
             connection.execute("DELETE FROM runtime_state WHERE key = ?", (key,))
+
+    def update_run_state(
+        self, run_id: str, status: str, finished_at: str | None
+    ) -> RunProgress:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            counts = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_tasks,
+                    SUM(status = 'success') AS success_tasks,
+                    SUM(status = 'failed') AS failed_tasks,
+                    SUM(status IN (
+                        'pending', 'running', 'retry_wait', 'blocked_wait'
+                    )) AS pending_tasks
+                FROM crawl_tasks WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if counts is None:
+                raise KeyError(run_id)
+            progress = RunProgress(
+                total_tasks=counts["total_tasks"],
+                success_tasks=counts["success_tasks"] or 0,
+                failed_tasks=counts["failed_tasks"] or 0,
+                pending_tasks=counts["pending_tasks"] or 0,
+            )
+            updated = connection.execute(
+                """
+                UPDATE crawl_runs
+                SET status = ?, finished_at = ?, total_tasks = ?,
+                    success_tasks = ?, failed_tasks = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    finished_at,
+                    progress.total_tasks,
+                    progress.success_tasks,
+                    progress.failed_tasks,
+                    run_id,
+                ),
+            )
+            if not updated.rowcount:
+                raise KeyError(run_id)
+            return progress
 
     def recover_interrupted_tasks(self) -> int:
         with self._connection() as connection:

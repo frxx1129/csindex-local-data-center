@@ -19,6 +19,7 @@ from csindex_local.db import Database
 from csindex_local.models import (
     CrawlEvent,
     IndexRecord,
+    RunProgress,
     ScopeSelection,
     UpdateMode,
     VolatilitySnapshot,
@@ -82,6 +83,49 @@ class FakeClient:
         return value
 
 
+class GateLimiter:
+    """Blocks the first run request after allowing prepare's probe."""
+
+    blocked_until = None
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.waiting = threading.Event()
+        self.release = threading.Event()
+
+    def before_request(self) -> None:
+        self.calls += 1
+        if self.calls > 1:
+            self.waiting.set()
+            assert self.release.wait(2)
+
+    def after_request(self) -> None:
+        pass
+
+    def enter_blocked_cooldown(self, now: datetime) -> datetime:
+        self.blocked_until = now + timedelta(seconds=1800)
+        return self.blocked_until
+
+    def clear_blocked_cooldown(self) -> None:
+        self.blocked_until = None
+
+
+class BlockingClient(FakeClient):
+    def __init__(self, blocked_code: str) -> None:
+        super().__init__()
+        self.blocked_code = blocked_code
+        self.request_started = threading.Event()
+        self.release_request = threading.Event()
+
+    def fetch_yield(self, code: str) -> YieldSnapshot:
+        if code != self.blocked_code:
+            return super().fetch_yield(code)
+        self.calls.append(("yield", code))
+        self.request_started.set()
+        assert self.release_request.wait(2)
+        return YieldSnapshot(code, TARGET_DATE, 1, 2, 3, 4, 5, 6)
+
+
 @pytest.fixture
 def database(tmp_path: Path) -> Database:
     value = Database(tmp_path / "crawler.db")
@@ -126,11 +170,42 @@ def build_crawler(
     return Crawler(client, database, limiter, clock=clock.now)
 
 
+def no_wait_config() -> AppConfig:
+    return AppConfig(
+        data_dir="",
+        export_dir="",
+        request_delay_min_seconds=0,
+        request_delay_max_seconds=0,
+        batch_size=100,
+        batch_rest_seconds=0,
+    )
+
+
+def build_persistent_crawler(
+    client: FakeClient, database: Database, clock: FakeClock
+) -> Crawler:
+    return Crawler(
+        client,
+        database,
+        config=no_wait_config(),
+        clock=clock.now,
+        sleep=clock.sleep,
+        random_uniform=lambda minimum, maximum: 0,
+    )
+
+
 def task_rows(database: Database, run_id: str):
     with database._connection() as connection:
         return connection.execute(
             "SELECT * FROM crawl_tasks WHERE run_id = ? ORDER BY id", (run_id,)
         ).fetchall()
+
+
+def run_row(database: Database, run_id: str):
+    with database._connection() as connection:
+        return connection.execute(
+            "SELECT * FROM crawl_runs WHERE id = ?", (run_id,)
+        ).fetchone()
 
 
 def make_retry_claimable(database: Database, run_id: str) -> None:
@@ -323,7 +398,31 @@ def test_date_mismatch_saves_actual_date_and_fails_target_task(
     assert "2026-09-02" in row["last_error"]
 
 
-def test_blocked_cooldown_state_and_escalation_survive_restart(
+def test_date_mismatch_binds_volatility_to_actual_yield_date_and_continues(
+    fake_client: FakeClient,
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue(
+        "yield", "000905", YieldSnapshot("000905", "2026-09-02", 1, 2, 3, 4, 5, 6)
+    )
+    crawler = build_crawler(fake_client, database, fast_limiter, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905", "000852")), UpdateMode.FORCE
+    )
+
+    progress = crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    actual = database.get_snapshot("000905", "2026-09-02")
+    assert actual["is_complete"] == 1
+    assert database.get_snapshot("000905", TARGET_DATE) is None
+    assert database.get_snapshot("000852", TARGET_DATE)["is_complete"] == 1
+    assert progress.success_tasks == 2
+    assert progress.failed_tasks == 2
+
+
+def test_cooldown_survives_restart_and_successful_probe_resets_escalation(
     fake_client: FakeClient,
     database: Database,
     fake_clock: FakeClock,
@@ -377,7 +476,103 @@ def test_blocked_cooldown_state_and_escalation_survive_restart(
 
     assert (
         datetime.fromisoformat(second_state["until"]) - fake_clock.now()
+    ).total_seconds() == 1800
+
+
+def test_prepare_probe_block_enters_and_persists_cooldown(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("yield", "000300", BlockedError("probe blocked"))
+    crawler = build_persistent_crawler(fake_client, database, fake_clock)
+
+    with pytest.raises(BlockedError, match="probe blocked"):
+        crawler.prepare_run(ScopeSelection("fixed_count", 1), UpdateMode.UPDATE)
+
+    state = database.get_runtime_state("waf_cooldown")
+    assert (
+        datetime.fromisoformat(state["until"]) - fake_clock.now()
+    ).total_seconds() == 1800
+    assert state["next_cooldown_seconds"] == 3600
+
+
+def test_run_block_stops_ordinary_work_and_successful_probe_clears_cooldown(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("yield", "000905", BlockedError("task blocked"))
+    crawler = build_persistent_crawler(fake_client, database, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905", "000852")), UpdateMode.FORCE
+    )
+
+    waiting = crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    assert waiting.pending_tasks == 4
+    assert fake_client.calls.count(("yield", "000905")) == 1
+    assert fake_client.calls.count(("yield", "000852")) == 0
+    assert database.get_runtime_state("waf_cooldown") is not None
+
+    finished = crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    assert fake_client.calls.count(("yield", "000300")) == 2
+    assert fake_client.calls.count(("yield", "000852")) == 1
+    assert database.get_runtime_state("waf_cooldown") is None
+    assert finished.pending_tasks == 0
+
+
+def test_failed_cooldown_probe_escalates_without_ordinary_requests(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("yield", "000905", BlockedError("task blocked"))
+    crawler = build_persistent_crawler(fake_client, database, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905", "000852")), UpdateMode.FORCE
+    )
+    crawler.run(run_id, CrawlControl(), lambda event: None)
+    first_until = datetime.fromisoformat(
+        database.get_runtime_state("waf_cooldown")["until"]
+    )
+    fake_client.queue("yield", "000300", BlockedError("probe still blocked"))
+
+    waiting = crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    state = database.get_runtime_state("waf_cooldown")
+    assert fake_clock.now() == first_until
+    assert (
+        datetime.fromisoformat(state["until"]) - fake_clock.now()
     ).total_seconds() == 3600
+    assert fake_client.calls.count(("yield", "000300")) == 2
+    assert fake_client.calls.count(("yield", "000852")) == 0
+    assert waiting.pending_tasks == 4
+
+
+def test_run_one_uses_baseline_probe_before_resuming_blocked_task(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("volatility", "000905", BlockedError("task blocked"))
+    crawler = build_persistent_crawler(fake_client, database, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    crawler.run_one(run_id)
+    crawler.run_one(run_id)
+    cooldown_until = datetime.fromisoformat(
+        database.get_runtime_state("waf_cooldown")["until"]
+    )
+    fake_clock.current = cooldown_until
+
+    crawler.run_one(run_id)
+
+    assert fake_client.calls.count(("yield", "000300")) == 2
+    assert fake_client.calls.count(("volatility", "000905")) == 1
+    assert database.get_runtime_state("waf_cooldown") is None
 
 
 def test_control_pause_resume_and_stop_are_thread_safe() -> None:
@@ -424,6 +619,101 @@ def test_pre_stopped_run_leaves_tasks_pending(
     assert fake_client.calls.count(("yield", "000905")) == 0
 
 
+def test_stop_during_rate_wait_releases_claim_without_sending_request(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    limiter = GateLimiter()
+    crawler = Crawler(fake_client, database, limiter, clock=fake_clock.now)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    control = CrawlControl()
+    result: list[object] = []
+    worker = threading.Thread(
+        target=lambda: result.append(crawler.run(run_id, control, lambda event: None))
+    )
+    worker.start()
+    assert limiter.waiting.wait(1)
+
+    control.stop()
+    limiter.release.set()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert fake_client.calls.count(("yield", "000905")) == 0
+    row = task_rows(database, run_id)[0]
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+
+
+def test_pause_during_rate_wait_defers_request_until_resume(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    limiter = GateLimiter()
+    crawler = Crawler(fake_client, database, limiter, clock=fake_clock.now)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    control = CrawlControl()
+    worker = threading.Thread(
+        target=lambda: crawler.run(run_id, control, lambda event: None)
+    )
+    worker.start()
+    assert limiter.waiting.wait(1)
+
+    control.pause()
+    limiter.release.set()
+    worker.join(0.05)
+    assert worker.is_alive()
+    assert fake_client.calls.count(("yield", "000905")) == 0
+
+    control.resume()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert fake_client.calls.count(("yield", "000905")) == 1
+
+
+def test_second_concurrent_run_cannot_start_another_detail_request(
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    client = BlockingClient("000905")
+    crawler = build_crawler(client, database, fast_limiter, fake_clock)
+    first_run = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    second_run = crawler.prepare_run(
+        ScopeSelection("codes", ("000852",)), UpdateMode.FORCE
+    )
+    first_worker = threading.Thread(
+        target=lambda: crawler.run(first_run, CrawlControl(), lambda event: None)
+    )
+    first_worker.start()
+    assert client.request_started.wait(1)
+    second_result: list[object] = []
+    second_worker = threading.Thread(
+        target=lambda: second_result.append(
+            crawler.run(second_run, CrawlControl(), lambda event: None)
+        )
+    )
+
+    second_worker.start()
+    second_worker.join(1)
+    client.release_request.set()
+    first_worker.join(2)
+
+    assert not second_worker.is_alive()
+    assert client.calls.count(("yield", "000852")) == 0
+    assert second_result[0].pending_tasks == 2
+    assert not first_worker.is_alive()
+
+
 def test_events_have_stable_frozen_shape(
     fake_client: FakeClient,
     database: Database,
@@ -438,10 +728,96 @@ def test_events_have_stable_frozen_shape(
 
     progress = crawler.run(run_id, CrawlControl(), events.append)
 
-    assert events[-1] == CrawlEvent("run_complete", run_id, progress)
+    assert events[-1] == CrawlEvent("run_completed", run_id, progress)
     assert {event.kind for event in events} >= {"task_started", "task_success"}
     with pytest.raises(FrozenInstanceError):
         events[-1].kind = "changed"
+
+
+def test_completed_run_persists_terminal_status_counts_and_event(
+    fake_client: FakeClient,
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    crawler = build_crawler(fake_client, database, fast_limiter, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000300",)), UpdateMode.MISSING
+    )
+    events: list[CrawlEvent] = []
+
+    progress = crawler.run(run_id, CrawlControl(), events.append)
+    row = run_row(database, run_id)
+
+    assert progress == row_progress(row)
+    assert row["status"] == "completed"
+    assert row["finished_at"] is not None
+    assert events[-1].kind == "run_completed"
+
+
+def test_failed_run_persists_completed_with_failures_and_matching_event(
+    fake_client: FakeClient,
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("yield", "000905", NotFoundError("gone"))
+    crawler = build_crawler(fake_client, database, fast_limiter, fake_clock)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    events: list[CrawlEvent] = []
+
+    progress = crawler.run(run_id, CrawlControl(), events.append)
+    row = run_row(database, run_id)
+
+    assert progress.failed_tasks == 2
+    assert row["status"] == "completed_with_failures"
+    assert row["failed_tasks"] == 2
+    assert row["finished_at"] is not None
+    assert events[-1].kind == "run_completed_with_failures"
+
+
+def test_waiting_and_stopped_runs_persist_distinct_noncompleted_states(
+    fake_client: FakeClient,
+    database: Database,
+    fast_limiter: RateLimiter,
+    fake_clock: FakeClock,
+) -> None:
+    fake_client.queue("yield", "000905", NetworkError("offline"))
+    crawler = build_crawler(fake_client, database, fast_limiter, fake_clock)
+    waiting_run = crawler.prepare_run(
+        ScopeSelection("codes", ("000905",)), UpdateMode.FORCE
+    )
+    waiting_events: list[CrawlEvent] = []
+    crawler.run(waiting_run, CrawlControl(), waiting_events.append)
+
+    waiting = run_row(database, waiting_run)
+    assert waiting["status"] == "waiting"
+    assert waiting["finished_at"] is None
+    assert waiting_events[-1].kind == "run_waiting"
+
+    stopped_run = crawler.prepare_run(
+        ScopeSelection("codes", ("000852",)), UpdateMode.FORCE
+    )
+    control = CrawlControl()
+    control.stop()
+    stopped_events: list[CrawlEvent] = []
+    crawler.run(stopped_run, control, stopped_events.append)
+
+    stopped = run_row(database, stopped_run)
+    assert stopped["status"] == "stopped"
+    assert stopped["finished_at"] is not None
+    assert stopped_events[-1].kind == "run_stopped"
+
+
+def row_progress(row) -> RunProgress:
+    return RunProgress(
+        total_tasks=row["total_tasks"],
+        success_tasks=row["success_tasks"],
+        failed_tasks=row["failed_tasks"],
+        pending_tasks=row["total_tasks"] - row["success_tasks"] - row["failed_tasks"],
+    )
 
 
 def test_runtime_state_round_trip_and_delete(database: Database) -> None:
@@ -456,4 +832,3 @@ def test_runtime_state_round_trip_and_delete(database: Database) -> None:
 
     assert loaded == value
     assert database.get_runtime_state("waf_cooldown") is None
-
