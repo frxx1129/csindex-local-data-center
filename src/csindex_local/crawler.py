@@ -91,6 +91,9 @@ class Crawler:
     ) -> None:
         self._client = client
         self._database = database
+        add_response_observer = getattr(self._client, "add_response_observer", None)
+        if callable(add_response_observer):
+            add_response_observer(self._database.record_raw_response)
         self._clock = clock or _utc_now
         self._queue = TaskQueue(database, clock=self._clock)
         if limiter is None:

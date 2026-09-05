@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from .models import IndexRecord, VolatilitySnapshot, YieldSnapshot
+from .models import IndexRecord, RawResponse, VolatilitySnapshot, YieldSnapshot
 
 
 DEFAULT_BASE_URL = "https://www.csindex.com.cn/csindex-home"
@@ -17,6 +18,8 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+_Parsed = TypeVar("_Parsed")
+ResponseObserver = Callable[[RawResponse], None]
 
 
 class CsindexClientError(RuntimeError):
@@ -55,9 +58,24 @@ class CsindexClient:
     This class deliberately contains no retry, rate limiting, or persistence policy.
     """
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout_seconds: int = 20):
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout_seconds: int = 20,
+        *,
+        response_observer: ResponseObserver | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self._response_observers: list[ResponseObserver] = []
+        if response_observer is not None:
+            self._response_observers.append(response_observer)
+
+    def add_response_observer(self, observer: ResponseObserver) -> None:
+        """Attach persistence/diagnostic handling without coupling HTTP to SQLite."""
+
+        if observer not in self._response_observers:
+            self._response_observers.append(observer)
 
     def fetch_index_list(self) -> list[IndexRecord]:
         rows: list[IndexRecord] = []
@@ -65,39 +83,57 @@ class CsindexClient:
         total: int | None = None
 
         while total is None or len(rows) < total:
-            payload = self._post_json(
-                "/index-list/query-index-item", self._index_list_payload(page_num)
+            def parse_page(payload: object) -> tuple[int, list[IndexRecord]]:
+                page_total, page_rows = self._parse_index_list_page(payload)
+                if total is not None and page_total != total:
+                    raise ResponseFormatError(
+                        "index list total changed during pagination"
+                    )
+                if not page_rows and len(rows) < page_total:
+                    raise ResponseFormatError("index list ended before total")
+                if len(rows) + len(page_rows) > page_total:
+                    raise ResponseFormatError(
+                        "index list has more rows than total"
+                    )
+                return page_total, page_rows
+
+            page_total, page_rows = self._post_parsed(
+                "/index-list/query-index-item",
+                self._index_list_payload(page_num),
+                endpoint="index_list",
+                index_code=None,
+                parser=parse_page,
             )
-            page_total, page_rows = self._parse_index_list_page(payload)
             if total is None:
                 total = page_total
-            elif page_total != total:
-                raise ResponseFormatError("index list total changed during pagination")
 
             if not page_rows:
-                if len(rows) < total:
-                    raise ResponseFormatError("index list ended before total")
                 break
             rows.extend(page_rows)
-            if len(rows) > total:
-                raise ResponseFormatError("index list has more rows than total")
             page_num += 1
 
         return rows
 
     def fetch_yield(self, code: str) -> YieldSnapshot:
         safe_code = self._validate_code(code)
-        payload = self._get_json(f"/perf/get-index-yield-item/{safe_code}", code)
-        return self.parse_yield(payload)
+        return self._get_parsed(
+            f"/perf/get-index-yield-item/{safe_code}",
+            code,
+            endpoint="yield",
+            parser=self.parse_yield,
+        )
 
     def fetch_volatility(self, code: str, data_date: str) -> VolatilitySnapshot:
         safe_code = self._validate_code(code)
         if not isinstance(data_date, str) or not data_date:
             raise ValueError("data_date must be a non-empty string")
-        payload = self._get_json(
-            f"/perf/get-index-yield-item-nianHua/{safe_code}", code
+        return self._get_parsed(
+            f"/perf/get-index-yield-item-nianHua/{safe_code}",
+            code,
+            endpoint="volatility",
+            parser=lambda payload: self.parse_volatility(payload, code, data_date),
+            data_date=data_date,
         )
-        return self.parse_volatility(payload, code, data_date)
 
     @staticmethod
     def parse_yield(payload: object) -> YieldSnapshot:
@@ -139,15 +175,37 @@ class CsindexClient:
             raise NotFoundError("CSIndex returned HTTP 404")
         raise NetworkError(f"CSIndex returned HTTP {status}")
 
-    def _get_json(self, path: str, code: str) -> dict[str, Any]:
+    def _get_parsed(
+        self,
+        path: str,
+        code: str,
+        *,
+        endpoint: str,
+        parser: Callable[[object], _Parsed],
+        data_date: str | None = None,
+    ) -> _Parsed:
         request = Request(
             self._url(path),
             headers=self._detail_headers(code),
             method="GET",
         )
-        return self._request_json(request)
+        return self._request_parsed(
+            request,
+            endpoint=endpoint,
+            index_code=code,
+            parser=parser,
+            data_date=data_date,
+        )
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_parsed(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        endpoint: str,
+        index_code: str | None,
+        parser: Callable[[object], _Parsed],
+    ) -> _Parsed:
         request = Request(
             self._url(path),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -158,25 +216,86 @@ class CsindexClient:
             },
             method="POST",
         )
-        return self._request_json(request)
+        return self._request_parsed(
+            request,
+            endpoint=endpoint,
+            index_code=index_code,
+            parser=parser,
+        )
 
-    def _request_json(self, request: Request) -> dict[str, Any]:
+    def _request_parsed(
+        self,
+        request: Request,
+        *,
+        endpoint: str,
+        index_code: str | None,
+        parser: Callable[[object], _Parsed],
+        data_date: str | None = None,
+    ) -> _Parsed:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read()
+                status = int(getattr(response, "status", 200))
         except HTTPError as error:
-            self.classify_http_error(error.code, error.read())
+            body = error.read()
+            self._observe_response(
+                index_code, endpoint, error.code, body, False, data_date
+            )
+            self.classify_http_error(error.code, body)
             raise AssertionError("HTTP error classification must raise")
         except (URLError, TimeoutError, OSError) as error:
             raise NetworkError("CSIndex request failed") from error
 
+        if status >= 400:
+            self._observe_response(index_code, endpoint, status, body, False, data_date)
+            self.classify_http_error(status, body)
+            raise AssertionError("HTTP error classification must raise")
+
         try:
-            payload = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            payload_text = body.decode("utf-8")
+            payload = json.loads(payload_text)
+        except UnicodeDecodeError as error:
+            self._observe_response(index_code, endpoint, status, body, False, data_date)
+            raise ResponseFormatError("CSIndex response is not valid UTF-8") from error
+        except json.JSONDecodeError as error:
+            self._observe_response(index_code, endpoint, status, body, False, data_date)
             raise ResponseFormatError("CSIndex response is not valid JSON") from error
         if not isinstance(payload, dict):
+            self._observe_response(index_code, endpoint, status, body, False, data_date)
             raise ResponseFormatError("CSIndex JSON response must be an object")
-        return payload
+        try:
+            parsed = parser(payload)
+        except Exception:
+            self._observe_response(index_code, endpoint, status, body, False, data_date)
+            raise
+        parsed_date = getattr(parsed, "data_date", None) or data_date
+        self._observe_response(
+            index_code, endpoint, status, body, True, parsed_date
+        )
+        return parsed
+
+    def _observe_response(
+        self,
+        index_code: str | None,
+        endpoint: str,
+        http_status: int,
+        body: bytes,
+        is_success: bool,
+        data_date: str | None,
+    ) -> None:
+        if not self._response_observers:
+            return
+        record = RawResponse(
+            index_code=index_code,
+            endpoint=endpoint,
+            http_status=http_status,
+            data_date=data_date,
+            payload=body.decode("utf-8", errors="replace"),
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            is_success=is_success,
+        )
+        for observer in tuple(self._response_observers):
+            observer(record)
 
     @staticmethod
     def _index_list_payload(page_num: int) -> dict[str, Any]:

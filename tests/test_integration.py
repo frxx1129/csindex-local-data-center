@@ -126,6 +126,13 @@ def test_twenty_indices_resume_same_database_without_repeating_successes(
         "缺失与异常",
         "说明",
     ]
+    with database._connection() as connection:
+        persisted = connection.execute(
+            "SELECT COUNT(*) AS count, SUM(is_success) AS successes FROM raw_responses"
+        ).fetchone()
+    # One catalogue page, one CSI-300 probe, and forty detail requests all
+    # travelled through the real client observer into SQLite.
+    assert (persisted["count"], persisted["successes"]) == (42, 42)
     for code in codes:
         assert fake_server.detail_request_counts[f"yield:{code}"] == 1
         assert fake_server.detail_request_counts[f"volatility:{code}"] == 1
@@ -164,6 +171,13 @@ def test_waf_cooldown_is_persisted_before_restart_and_no_task_follows_block(
     state = database.get_runtime_state("waf_cooldown")
     assert state is not None
     assert state["next_cooldown_seconds"] == 3600
+    with database._connection() as connection:
+        blocked = connection.execute(
+            "SELECT http_status, payload, is_success FROM raw_responses WHERE http_status = 403"
+        ).fetchone()
+    assert blocked is not None
+    assert "WAF" in blocked["payload"]
+    assert blocked["is_success"] == 0
 
     # A fresh coordinator reads the same persisted deadline.  Its injected
     # sleep advances virtual time, so no real 30-minute wait occurs.
@@ -198,6 +212,13 @@ def test_business_404_fails_only_its_request_and_other_indices_continue(
     assert fake_server.detail_request_counts["volatility:000002"] == 1
     assert "HTTP 404" in failed[0]["last_error"]
     assert database.get_runtime_state("waf_cooldown") is None
+    with database._connection() as connection:
+        missing = connection.execute(
+            "SELECT payload, is_success FROM raw_responses WHERE http_status = 404"
+        ).fetchone()
+    assert missing is not None
+    assert "does not exist" in missing["payload"]
+    assert missing["is_success"] == 0
 
 
 def test_timeout_bad_json_and_date_mismatch_retry_or_export_anomalies(
@@ -243,3 +264,10 @@ def test_timeout_bad_json_and_date_mismatch_retry_or_export_anomalies(
     assert fake_server.detail_request_counts["yield:000002"] == 2
     assert any(row["index_code"] == "000003" and "data date mismatch" in row["last_error"] for row in task_rows(database, run_id))
     assert "数据日期不一致" in issue_values
+    with database._connection() as connection:
+        malformed = connection.execute(
+            """SELECT payload, is_success FROM raw_responses
+               WHERE index_code = '000002' AND endpoint = 'yield' AND is_success = 0"""
+        ).fetchone()
+    assert malformed is not None
+    assert malformed["payload"] == "{not-json"

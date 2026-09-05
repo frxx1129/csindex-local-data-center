@@ -33,6 +33,19 @@ class VolatilitySnapshot:
 
 
 @dataclass(frozen=True)
+class RawResponse:
+    """One received HTTP response, classified after endpoint parsing."""
+
+    index_code: str | None
+    endpoint: str
+    http_status: int
+    data_date: str | None
+    payload: str
+    fetched_at: str
+    is_success: bool
+
+
+@dataclass(frozen=True)
 class MetricRow:
     """The latest exportable metrics for one index inside a frozen scope."""
 

@@ -10,6 +10,7 @@ from typing import Iterator
 from csindex_local.models import (
     CrawlScope,
     IndexRecord,
+    RawResponse,
     RunProgress,
     VolatilitySnapshot,
     YieldSnapshot,
@@ -115,7 +116,8 @@ class Database:
                     http_status INTEGER NOT NULL,
                     data_date TEXT,
                     payload TEXT,
-                    fetched_at TEXT NOT NULL
+                    fetched_at TEXT NOT NULL,
+                    is_success INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS crawl_runs (
@@ -159,6 +161,57 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
                 """
+            )
+            raw_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(raw_responses)")
+            }
+            if "is_success" not in raw_columns:
+                connection.execute(
+                    "ALTER TABLE raw_responses "
+                    "ADD COLUMN is_success INTEGER NOT NULL DEFAULT 0"
+                )
+
+    def record_raw_response(self, response: RawResponse) -> None:
+        """Persist diagnostics and cap only successful rows per response stream."""
+
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO raw_responses (
+                    index_code, endpoint, http_status, data_date, payload,
+                    fetched_at, is_success
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    response.index_code,
+                    response.endpoint,
+                    response.http_status,
+                    response.data_date,
+                    response.payload,
+                    response.fetched_at,
+                    int(response.is_success),
+                ),
+            )
+            if not response.is_success:
+                return
+            if response.index_code is None:
+                stream_predicate = "index_code IS NULL"
+                parameters: tuple[object, ...] = (response.endpoint,)
+            else:
+                stream_predicate = "index_code = ?"
+                parameters = (response.endpoint, response.index_code)
+            connection.execute(
+                f"""
+                DELETE FROM raw_responses
+                WHERE id IN (
+                    SELECT id FROM raw_responses
+                    WHERE endpoint = ? AND {stream_predicate} AND is_success = 1
+                    ORDER BY fetched_at DESC, id DESC
+                    LIMIT -1 OFFSET 2
+                )
+                """,
+                parameters,
             )
 
     def upsert_indices(self, items: list[IndexRecord]) -> None:
