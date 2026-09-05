@@ -10,11 +10,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
+from pathlib import PureWindowsPath
 from typing import Sequence
 
 from .config import AppConfig
@@ -83,14 +86,65 @@ def _resolve_root(value: str | os.PathLike[str] | None) -> Path:
 
 
 def _validate_storage_path(path: Path, label: str) -> Path:
-    """Reject C: storage paths before any directory or SQLite operation."""
+    """Reject local C-drive paths, including Windows alias spellings.
 
-    drive = path.drive.upper().replace("\\?\\", "")
-    if drive == "C:":
+    ``Path.drive`` alone is insufficient for extended paths and UNC
+    administrative shares.  Parse with ``PureWindowsPath`` so this guard
+    remains explicit and stable even when a path does not exist yet.
+    """
+
+    if _is_local_c_path(path):
         raise CliUsageError(
             f"{label}位于 C 盘: {path}。请将程序/路径移到 E 盘或其他非 C 盘后重试。"
         )
     return path
+
+
+def _is_local_c_path(path: Path) -> bool:
+    raw = str(path).replace("/", "\\")
+    drive = PureWindowsPath(raw).drive
+    upper_drive = drive.upper()
+    if upper_drive == "C:":
+        return True
+
+    # Extended drive paths: \\?\C:\... and device-style \\.\C:\....
+    for prefix in ("\\\\?\\", "\\\\.\\"):
+        if upper_drive.startswith(prefix.upper()):
+            tail = upper_drive[len(prefix) :]
+            if tail == "C:":
+                return True
+            if tail == "C$" or tail.startswith("C$\\"):
+                return prefix == "\\\\.\\"
+            if tail.startswith("UNC\\"):
+                return _is_local_c_unc(tail[4:].split("\\", 2))
+            return False
+
+    # Standard or extended UNC path.  Only this machine's C$ share is local;
+    # remote hosts and their ordinary shares remain valid storage locations.
+    if upper_drive.startswith("\\\\"):
+        return _is_local_c_unc(upper_drive.lstrip("\\").split("\\", 2))
+    return False
+
+
+def _is_local_c_unc(parts: list[str]) -> bool:
+    if len(parts) < 2 or parts[1].upper() != "C$":
+        return False
+    host = parts[0].strip("[]").rstrip(".").casefold()
+    aliases = {
+        ".",
+        "localhost",
+        socket.gethostname().rstrip(".").casefold(),
+        socket.getfqdn().rstrip(".").casefold(),
+    }
+    computer_name = os.environ.get("COMPUTERNAME")
+    if computer_name:
+        aliases.add(computer_name.rstrip(".").casefold())
+    if host in aliases:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _database_path(config: AppConfig) -> Path:

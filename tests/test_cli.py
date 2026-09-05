@@ -84,6 +84,26 @@ def test_c_drive_root_is_rejected_before_initialization(cli_runner):
     assert "移到 E 盘或其他非 C 盘" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "raw_path",
+    [
+        r"\\?\C:\csindex-local-test",
+        r"\\localhost\c$\csindex-local-test",
+        r"\\127.0.0.1\c$\csindex-local-test",
+        r"\\.\c$\csindex-local-test",
+        r"\\?\UNC\localhost\c$\csindex-local-test",
+    ],
+)
+def test_local_c_aliases_are_rejected(raw_path: str):
+    with pytest.raises(cli.CliUsageError, match="移到 E 盘或其他非 C 盘"):
+        cli._validate_storage_path(Path(raw_path), "程序根目录")
+
+
+def test_remote_shares_are_not_mistaken_for_local_c_drive():
+    assert not cli._is_local_c_path(Path(r"\\remote-host\share\folder"))
+    assert not cli._is_local_c_path(Path(r"\\remote-host\c$\folder"))
+
+
 def test_c_drive_config_directories_are_rejected(cli_runner, tmp_path: Path):
     config = AppConfig.default(tmp_path)
     config.data_dir = r"C:\csindex-local-data"
