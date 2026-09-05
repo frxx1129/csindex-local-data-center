@@ -33,6 +33,26 @@ class VolatilitySnapshot:
 
 
 @dataclass(frozen=True)
+class MetricRow:
+    """The latest exportable metrics for one index inside a frozen scope."""
+
+    index_code: str
+    index_name: str
+    data_date: str
+    one_month: float | None
+    three_month: float | None
+    year_to_date: float | None
+    one_year: float | None
+    three_year: float | None
+    five_year: float | None
+    one_year_volatility: float | None
+    three_year_volatility: float | None
+    five_year_volatility: float | None
+    missing_count: int
+    is_complete: bool
+
+
+@dataclass(frozen=True)
 class CrawlScope:
     id: str
     name: str
