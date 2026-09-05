@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 import tkinter as tk
+from tkinter import messagebox
 
 from .cli import CONFIG_EXIT, _load_context, _resolve_root
 from .crawler import Crawler
@@ -33,15 +34,19 @@ def _services(root: Path) -> GuiServices:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        services = None if args.demo else _services(_resolve_root(args.root))
-    except (OSError, ValueError) as exc:
-        print(f"配置错误：{exc}", file=sys.stderr)
-        return CONFIG_EXIT
-    try:
         root = tk.Tk()
+        root.withdraw()
     except tk.TclError as exc:
         print(f"无法启动图形界面：{exc}", file=sys.stderr)
         return 1
+    try:
+        services = None if args.demo else _services(_resolve_root(args.root))
+    except (OSError, ValueError) as exc:
+        print(f"配置错误：{exc}", file=sys.stderr)
+        messagebox.showerror("启动失败", f"配置错误：{exc}", parent=root)
+        root.destroy()
+        return CONFIG_EXIT
+    root.deiconify()
     window = AppWindow(root, services)
     if args.demo:
         window.start_demo()

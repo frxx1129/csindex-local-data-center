@@ -67,7 +67,11 @@ class _Context:
 def _source_root() -> Path:
     """Locate the project directory in source mode or the executable folder."""
 
-    if getattr(sys, "frozen", False):
+    # Nuitka onefile exposes ``__compiled__`` but does not guarantee the
+    # PyInstaller-style ``sys.frozen`` flag.  ``__file__`` points into its
+    # temporary extraction directory, so packaged builds must use the real
+    # executable location.
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
     # cli.py lives below <project>/src/csindex_local.
     return Path(__file__).resolve().parents[2]

@@ -104,6 +104,13 @@ def test_remote_shares_are_not_mistaken_for_local_c_drive():
     assert not cli._is_local_c_path(Path(r"\\remote-host\c$\folder"))
 
 
+def test_nuitka_build_uses_real_executable_directory(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(cli, "__compiled__", object(), raising=False)
+    monkeypatch.setattr(cli.sys, "executable", r"E:\apps\csindex\csindex.exe")
+
+    assert cli._source_root() == Path(r"E:\apps\csindex")
+
+
 def test_c_drive_config_directories_are_rejected(cli_runner, tmp_path: Path):
     config = AppConfig.default(tmp_path)
     config.data_dir = r"C:\csindex-local-data"
