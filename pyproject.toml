@@ -7,9 +7,15 @@ name = "csindex-local"
 version = "0.1.0"
 description = "Local data center for China Securities Index data"
 requires-python = ">=3.12"
+dependencies = [
+  "openpyxl>=3.1,<4",
+]
 
 [project.scripts]
 csindex-local = "csindex_local.cli:main"
+
+[project.gui-scripts]
+csindex-local-gui = "csindex_local.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

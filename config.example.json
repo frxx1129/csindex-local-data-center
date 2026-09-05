@@ -1,0 +1,12 @@
+{
+  "data_dir": "data",
+  "export_dir": "exports",
+  "request_delay_min_seconds": 7.0,
+  "request_delay_max_seconds": 8.0,
+  "batch_size": 25,
+  "batch_rest_seconds": 150,
+  "blocked_initial_cooldown_seconds": 1800,
+  "blocked_max_cooldown_seconds": 3600,
+  "http_timeout_seconds": 20,
+  "default_scope": "2000"
+}

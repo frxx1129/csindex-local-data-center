@@ -230,10 +230,13 @@ def test_timeout_bad_json_and_date_mismatch_retry_or_export_anomalies(
     fake_server.plan("yield", "000001", "timeout", "ok")
     fake_server.plan("yield", "000002", "bad_json", "ok")
     fake_server.plan("yield", "000003", ("yield_date", "2026-09-02"))
-    crawler = make_crawler(fake_server, database, clock, timeout=0.03)
+    # Keep catalogue/probe setup tolerant of a busy Windows test runner; only
+    # the planned detail request needs the deliberately tiny transport timeout.
+    crawler = make_crawler(fake_server, database, clock, timeout=1)
     run_id = crawler.prepare_run(
         ScopeSelection("codes", ("000001", "000002", "000003")), UpdateMode.FORCE
     )
+    crawler._client.timeout_seconds = 0.03
 
     # Drive the three yields without allowing a volatility dependency wait to
     # end the run loop before every injected transport scenario is exercised.
