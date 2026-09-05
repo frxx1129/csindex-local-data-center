@@ -24,6 +24,12 @@ from .excel_exporter import ExcelExporter
 from .models import CrawlEvent, RunProgress, ScopeSelection, UpdateMode
 
 
+_SYNTHETIC_PROGRESS = RunProgress(-1, -1, -1, -1)
+_COUNTS_ROW = 4
+_CURRENT_ROW = 5
+_DETAILS_ROW = 6
+
+
 def enqueue_event(events: Queue[CrawlEvent], event: CrawlEvent) -> None:
     """Thread-safe event sink used by crawler and GUI worker threads."""
 
@@ -43,6 +49,7 @@ class UiState:
     current_index: str
     current_endpoint: str
     cooldown_seconds: int
+    cooldown_until: datetime | None
     eta_text: str
     logs: tuple[str, ...]
     can_start: bool
@@ -63,6 +70,7 @@ class UiState:
             current_index="--",
             current_endpoint="--",
             cooldown_seconds=0,
+            cooldown_until=None,
             eta_text="--",
             logs=(),
             can_start=True,
@@ -72,29 +80,36 @@ class UiState:
             can_export=True,
         )
 
-    def reduce(self, event: CrawlEvent) -> "UiState":
+    def reduce(self, event: CrawlEvent, *, now: datetime | None = None) -> "UiState":
         """Return a new state; this method never accesses Tk or a worker."""
 
+        current_time = _as_utc(now)
         progress = event.progress
-        total = max(0, progress.total_tasks)
-        # The dashboard's primary progress is successful endpoint collection;
-        # failures stay visible in their own counter instead of pretending they
-        # advanced the useful-data bar.
-        completed = min(total, progress.success_tasks)
         current_index = event.index_code or self.current_index
         current_endpoint = _endpoint_label(event.endpoint) if event.endpoint else self.current_endpoint
-        eta = _eta_text(progress.pending_tasks)
-        next_state = replace(
-            self,
-            progress_value=completed,
-            progress_max=total,
-            success_count=progress.success_tasks,
-            failed_count=progress.failed_tasks,
-            pending_count=progress.pending_tasks,
-            current_index=current_index,
-            current_endpoint=current_endpoint,
-            eta_text=eta,
-        )
+        if _has_real_progress(progress):
+            total = max(0, progress.total_tasks)
+            # The dashboard's primary progress is successful endpoint
+            # collection; failures stay visible in their own counter.
+            next_state = replace(
+                self,
+                progress_value=min(total, progress.success_tasks),
+                progress_max=total,
+                success_count=progress.success_tasks,
+                failed_count=progress.failed_tasks,
+                pending_count=progress.pending_tasks,
+                current_index=current_index,
+                current_endpoint=current_endpoint,
+                eta_text=_eta_text(progress.pending_tasks),
+            )
+        else:
+            # UI/worker/export notifications do not own crawler progress.
+            # Retain the latest real counts instead of replacing them with 0.
+            next_state = replace(
+                self,
+                current_index=current_index,
+                current_endpoint=current_endpoint,
+            )
 
         kind = event.kind
         if kind in {"ui_started", "run_prepared", "task_started"}:
@@ -102,6 +117,7 @@ class UiState:
                 next_state,
                 status_text="正在抓取",
                 cooldown_seconds=0,
+                cooldown_until=None,
                 can_start=False,
                 can_pause=True,
                 can_resume=False,
@@ -133,11 +149,12 @@ class UiState:
                 can_stop=False,
             )
         elif kind == "task_blocked":
-            cooldown = _cooldown_seconds(event.available_at)
+            deadline = _parse_available_at(event.available_at)
             next_state = replace(
                 next_state,
                 status_text="官网限流冷却中",
-                cooldown_seconds=cooldown,
+                cooldown_seconds=_seconds_until(deadline, current_time),
+                cooldown_until=deadline,
                 can_pause=False,
                 can_resume=False,
                 can_stop=True,
@@ -159,6 +176,7 @@ class UiState:
                 next_state,
                 status_text="抓取完成" if kind == "run_completed" else "抓取完成（含失败项）",
                 cooldown_seconds=0,
+                cooldown_until=None,
                 can_start=True,
                 can_pause=False,
                 can_resume=False,
@@ -191,6 +209,19 @@ class UiState:
         if message:
             next_state = replace(next_state, logs=(next_state.logs + (message,))[-200:])
         return next_state
+
+    def tick(self, now: datetime | None = None) -> "UiState":
+        """Advance the displayed cooldown with the Tk main-loop clock only."""
+
+        if self.cooldown_until is None:
+            return self
+        remaining = _seconds_until(self.cooldown_until, _as_utc(now))
+        if remaining == self.cooldown_seconds:
+            return self
+        status = self.status_text
+        if remaining == 0 and status == "官网限流冷却中":
+            status = "冷却结束，等待恢复抓取"
+        return replace(self, cooldown_seconds=remaining, status_text=status)
 
 
 @dataclass(frozen=True)
@@ -233,7 +264,7 @@ class AppWindow:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(5, weight=1)
+        frame.rowconfigure(_DETAILS_ROW, weight=1)
 
         ttk.Label(frame, text="抓取范围：").grid(row=0, column=0, sticky="w")
         ttk.Combobox(frame, textvariable=self.scope_var, values=("1000", "2000", "全部"), state="readonly", width=12).grid(row=0, column=1, sticky="w")
@@ -253,11 +284,11 @@ class AppWindow:
         ttk.Label(frame, textvariable=self.status_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=2, column=0, columnspan=4, sticky="w")
         self.progress = ttk.Progressbar(frame, orient="horizontal", mode="determinate")
         self.progress.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 4))
-        ttk.Label(frame, textvariable=self.counts_var).grid(row=4, column=0, columnspan=4, sticky="w")
-        ttk.Label(frame, textvariable=self.current_var).grid(row=4, column=1, columnspan=3, sticky="w")
+        ttk.Label(frame, textvariable=self.counts_var).grid(row=_COUNTS_ROW, column=0, columnspan=4, sticky="w")
+        ttk.Label(frame, textvariable=self.current_var).grid(row=_CURRENT_ROW, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         details = ttk.Frame(frame)
-        details.grid(row=5, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        details.grid(row=_DETAILS_ROW, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         details.columnconfigure(0, weight=1)
         details.rowconfigure(2, weight=1)
         ttk.Label(details, textvariable=self.cooldown_var).grid(row=0, column=0, sticky="w")
@@ -272,7 +303,7 @@ class AppWindow:
         if self._worker is not None and self._worker.is_alive():
             return
         self._control = CrawlControl()
-        self.event_queue.put(_ui_event("ui_started"))
+        self.event_queue.put(_ui_event("ui_started", progress=RunProgress(0, 0, 0, 0)))
         selection = _scope_selection(self.scope_var.get())
         mode = _mode_selection(self.mode_var.get())
         self._worker = threading.Thread(
@@ -291,7 +322,7 @@ class AppWindow:
             self.event_queue.put(_ui_event("run_prepared", run_id=run_id))
             self.services.crawler.run(run_id, self._control, lambda item: enqueue_event(self.event_queue, item))
         except Exception as exc:
-            self.event_queue.put(_ui_event("worker_failed", message=str(exc)))
+            self.event_queue.put(_ui_event("worker_failed", message=worker_error_message("抓取", exc)))
 
     def pause(self) -> None:
         if self._control is not None:
@@ -330,7 +361,7 @@ class AppWindow:
             result = self.services.exporter.export(scope_id, output, None)
             self.event_queue.put(_ui_event("exported", message=f"已导出：{result}"))
         except Exception as exc:
-            self.event_queue.put(_ui_event("worker_failed", message=f"导出失败：{exc}"))
+            self.event_queue.put(_ui_event("worker_failed", message=worker_error_message("导出", exc)))
 
     def start_demo(self) -> None:
         """Schedule offline fake events; it creates neither HTTP clients nor requests."""
@@ -357,6 +388,10 @@ class AppWindow:
                 self._apply_event(self.event_queue.get_nowait())
         except Empty:
             pass
+        ticked = self.state.tick()
+        if ticked is not self.state:
+            self.state = ticked
+            self._render()
         if self._closing_since is not None:
             self._check_shutdown()
         else:
@@ -366,7 +401,7 @@ class AppWindow:
         self.state = self.state.reduce(event)
         self._render()
         if event.kind == "worker_failed":
-            messagebox.showerror("操作失败", event.message or "后台任务发生未知错误。")
+            messagebox.showerror("操作失败", display_error_message(event.message))
         elif event.kind == "exported":
             messagebox.showinfo("导出完成", event.message or "Excel 已导出。")
 
@@ -415,7 +450,7 @@ class AppWindow:
 
 
 def _ui_event(kind: str, *, run_id: str = "", progress: RunProgress | None = None, **kwargs: object) -> CrawlEvent:
-    return CrawlEvent(kind=kind, run_id=run_id, progress=progress or RunProgress(0, 0, 0, 0), **kwargs)
+    return CrawlEvent(kind=kind, run_id=run_id, progress=progress if progress is not None else _SYNTHETIC_PROGRESS, **kwargs)
 
 
 def _scope_selection(value: str) -> ScopeSelection:
@@ -434,16 +469,31 @@ def _endpoint_label(endpoint: str | None) -> str:
     return {"yield": "收益率", "volatility": "年化波动率"}.get(endpoint or "", endpoint or "--")
 
 
-def _cooldown_seconds(available_at: str | None) -> int:
+def _parse_available_at(available_at: str | None) -> datetime | None:
     if not available_at:
-        return 0
+        return None
     try:
         target = datetime.fromisoformat(available_at.replace("Z", "+00:00"))
         if target.tzinfo is None:
             target = target.replace(tzinfo=timezone.utc)
-        return max(0, int((target - datetime.now(timezone.utc)).total_seconds()))
+        return target.astimezone(timezone.utc)
     except ValueError:
+        return None
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    return current.replace(tzinfo=timezone.utc) if current.tzinfo is None else current.astimezone(timezone.utc)
+
+
+def _seconds_until(deadline: datetime | None, now: datetime) -> int:
+    if deadline is None:
         return 0
+    return max(0, int((deadline - now).total_seconds()))
+
+
+def _has_real_progress(progress: RunProgress) -> bool:
+    return progress.total_tasks >= 0
 
 
 def _eta_text(pending: int) -> str:
@@ -452,7 +502,7 @@ def _eta_text(pending: int) -> str:
 
 def _seconds_text(seconds: int) -> str:
     if seconds <= 0:
-        return "--"
+        return "0 秒"
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     if hours:
@@ -487,3 +537,16 @@ def _event_log(event: CrawlEvent) -> str:
     target = " ".join(item for item in (event.index_code, _endpoint_label(event.endpoint) if event.endpoint else None) if item)
     details = event.message or ""
     return "：".join(item for item in (label, target, details) if item)
+
+
+def worker_error_message(operation: str, error: Exception) -> str:
+    """Give background failures a Chinese user-facing context, retaining detail."""
+
+    detail = str(error).strip() or error.__class__.__name__
+    return f"后台{operation}失败：{detail}"
+
+
+def display_error_message(message: str | None) -> str:
+    if not message:
+        return "后台操作失败：发生未知错误。"
+    return message if message.startswith("后台") else f"后台操作失败：{message}"

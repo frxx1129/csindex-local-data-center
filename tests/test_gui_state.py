@@ -60,3 +60,52 @@ def test_worker_event_sink_only_enqueues_events() -> None:
     enqueue_event(events, item)
 
     assert events.get_nowait() is item
+
+
+def test_synthetic_ui_events_keep_existing_crawler_progress() -> None:
+    from csindex_local.gui import _ui_event, UiState
+
+    state = UiState.initial().reduce(
+        event("task_success", progress=RunProgress(400, 120, 2, 278))
+    )
+    paused = state.reduce(_ui_event("ui_paused"))
+    resumed = paused.reduce(_ui_event("ui_resumed"))
+    stopped = resumed.reduce(_ui_event("ui_stopped"))
+
+    for result in (paused, resumed, stopped):
+        assert (result.progress_value, result.progress_max) == (120, 400)
+        assert (result.success_count, result.failed_count, result.pending_count) == (
+            120,
+            2,
+            278,
+        )
+
+
+def test_cooldown_tick_counts_down_without_sleep() -> None:
+    from csindex_local.gui import UiState
+
+    now = datetime(2026, 9, 5, tzinfo=timezone.utc)
+    state = UiState.initial().reduce(
+        event("task_blocked", available_at=(now + timedelta(seconds=5)).isoformat()),
+        now=now,
+    )
+    ticking = state.tick(now + timedelta(seconds=2))
+    expired = ticking.tick(now + timedelta(seconds=6))
+
+    assert ticking.cooldown_seconds == 3
+    assert expired.cooldown_seconds == 0
+    assert expired.status_text == "冷却结束，等待恢复抓取"
+
+
+def test_worker_error_message_has_chinese_context_and_keeps_detail() -> None:
+    from csindex_local.gui import worker_error_message
+
+    text = worker_error_message("抓取", RuntimeError("connection reset"))
+
+    assert text == "后台抓取失败：connection reset"
+
+
+def test_dashboard_rows_do_not_overlap() -> None:
+    from csindex_local.gui import _COUNTS_ROW, _CURRENT_ROW, _DETAILS_ROW
+
+    assert _COUNTS_ROW < _CURRENT_ROW < _DETAILS_ROW
