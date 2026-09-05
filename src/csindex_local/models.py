@@ -85,6 +85,10 @@ class ScopeSelection:
     kind: str
     value: int | tuple[str, ...]
     regenerate: bool = False
+    # CLI code-file scopes use the file-content digest as their stable ID.
+    # Keeping this optional preserves the existing service API for callers that
+    # let the crawler derive the ID from the selected codes.
+    scope_id: str | None = None
 
 
 class UpdateMode(str, Enum):

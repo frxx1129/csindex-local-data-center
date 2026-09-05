@@ -400,8 +400,11 @@ class Crawler:
             missing = [code for code in codes if code not in available]
             if missing:
                 raise ValueError(f"unknown index codes: {', '.join(missing)}")
-            digest = sha256("\0".join(codes).encode("utf-8")).hexdigest()[:16]
-            scope_id = f"codes:{digest}"
+            if selection.scope_id:
+                scope_id = selection.scope_id
+            else:
+                digest = sha256("\0".join(codes).encode("utf-8")).hexdigest()[:12]
+                scope_id = f"codes:{digest}"
         else:
             raise ValueError(f"unsupported scope kind: {selection.kind}")
         return self._database.create_or_get_scope(
