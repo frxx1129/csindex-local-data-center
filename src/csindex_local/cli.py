@@ -72,12 +72,25 @@ def _source_root() -> Path:
 
 def _resolve_root(value: str | os.PathLike[str] | None) -> Path:
     if value is not None:
-        return Path(value).expanduser().resolve()
+        return _validate_storage_path(Path(value).expanduser().resolve(), "程序根目录")
     for name in ROOT_ENV_VARS:
         configured = os.environ.get(name)
         if configured:
-            return Path(configured).expanduser().resolve()
-    return _source_root()
+            return _validate_storage_path(
+                Path(configured).expanduser().resolve(), "程序根目录"
+            )
+    return _validate_storage_path(_source_root(), "程序根目录")
+
+
+def _validate_storage_path(path: Path, label: str) -> Path:
+    """Reject C: storage paths before any directory or SQLite operation."""
+
+    drive = path.drive.upper().replace("\\?\\", "")
+    if drive == "C:":
+        raise CliUsageError(
+            f"{label}位于 C 盘: {path}。请将程序/路径移到 E 盘或其他非 C 盘后重试。"
+        )
+    return path
 
 
 def _database_path(config: AppConfig) -> Path:
@@ -85,6 +98,7 @@ def _database_path(config: AppConfig) -> Path:
 
 
 def _load_context(root: Path, *, initialize: bool = False) -> _Context:
+    root = _validate_storage_path(root.resolve(), "程序根目录")
     config_path = root / "config.json"
     if not config_path.exists():
         if not initialize:
@@ -97,10 +111,20 @@ def _load_context(root: Path, *, initialize: bool = False) -> _Context:
     # them against the injected application root instead of the caller's CWD.
     data_dir = Path(config.data_dir)
     export_dir = Path(config.export_dir)
+    # Check drive-qualified relative Windows paths (for example C:folder)
+    # before joining them to the application root.
+    _validate_storage_path(data_dir, "数据目录")
+    _validate_storage_path(export_dir, "导出目录")
     if not data_dir.is_absolute():
         config.data_dir = str(root / data_dir)
     if not export_dir.is_absolute():
         config.export_dir = str(root / export_dir)
+    config.data_dir = str(
+        _validate_storage_path(Path(config.data_dir).expanduser().resolve(), "数据目录")
+    )
+    config.export_dir = str(
+        _validate_storage_path(Path(config.export_dir).expanduser().resolve(), "导出目录")
+    )
     if initialize:
         config.ensure_directories()
     database = Database(_database_path(config))
@@ -220,6 +244,9 @@ def _extract_root_argument(argv: Sequence[str] | None) -> tuple[str | None, list
 
 def _status(context: _Context, as_json: bool) -> int:
     try:
+        database_path = _database_path(context.config)
+        if not database_path.is_file():
+            raise RuntimeError(f"数据库不存在: {database_path}")
         with context.database._connection() as connection:
             counts = {
                 "indices": connection.execute(
@@ -282,11 +309,15 @@ def _crawl(context: _Context, raw_scope: str, mode: str, dry_run: bool) -> int:
 def _export(context: _Context, raw_scope: str, sort: str, limit: str, output: str | None) -> int:
     _, scope_id, _ = _scope_selection(raw_scope, context.root)
     ranking_limit = None if limit == "all" else int(limit)
+    raw_output = Path(output).expanduser() if output else None
+    if raw_output is not None:
+        _validate_storage_path(raw_output, "导出文件")
     output_path = (
-        (Path(output).expanduser() if Path(output).is_absolute() else context.root / Path(output))
-        if output
+        (raw_output if raw_output.is_absolute() else context.root / raw_output)
+        if raw_output is not None
         else Path(context.config.export_dir) / f"{scope_id.replace(':', '_')}_{sort}.xlsx"
     )
+    output_path = _validate_storage_path(output_path.expanduser().resolve(), "导出文件")
     exported = ExcelExporter(context.database).export(scope_id, output_path, ranking_limit)
     print(f"已导出: {exported}")
     return 0
@@ -320,6 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("用户停止操作", file=sys.stderr)
         return STOPPED_EXIT
+    except SystemExit as exc:
+        # argparse uses SystemExit for --help (0) and a few parser-level
+        # failures.  The library-facing main() contract must always return an
+        # integer instead of terminating the embedding process.
+        code = exc.code
+        return code if isinstance(code, int) else CONFIG_EXIT
     except CliUsageError as exc:
         print(f"配置/参数错误: {exc}", file=sys.stderr)
         return CONFIG_EXIT

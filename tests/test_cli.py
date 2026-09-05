@@ -69,3 +69,56 @@ def test_reset_running_is_offline(cli_runner, initialized_app):
     result = cli_runner(["reset-running"])
     assert result.exit_code == 0
     assert "重置" in result.stdout
+
+
+def test_help_and_invalid_arguments_return_codes(cli_runner):
+    help_result = cli_runner(["--help"])
+    invalid_result = cli_runner(["not-a-command"])
+    assert help_result.exit_code == 0
+    assert invalid_result.exit_code == 2
+
+
+def test_c_drive_root_is_rejected_before_initialization(cli_runner):
+    result = cli_runner(["init", "--root", r"C:\csindex-local-test"])
+    assert result.exit_code == 2
+    assert "移到 E 盘或其他非 C 盘" in result.stderr
+
+
+def test_c_drive_config_directories_are_rejected(cli_runner, tmp_path: Path):
+    config = AppConfig.default(tmp_path)
+    config.data_dir = r"C:\csindex-local-data"
+    config.save(tmp_path / "config.json")
+    result = cli_runner(["status", "--root", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "数据目录位于 C 盘" in result.stderr
+
+
+def test_c_drive_explicit_export_is_rejected(cli_runner, initialized_app, monkeypatch):
+    class UnexpectedExporter:
+        def __init__(self, database):
+            raise AssertionError("C 盘输出路径应在创建导出器前被拒绝")
+
+    monkeypatch.setattr(cli, "ExcelExporter", UnexpectedExporter)
+    result = cli_runner(
+        [
+            "export",
+            "--scope",
+            "fixed:1",
+            "--output",
+            r"C:\csindex-local-export.xlsx",
+        ]
+    )
+    assert result.exit_code == 2
+    assert "导出文件位于 C 盘" in result.stderr
+
+
+def test_status_missing_database_returns_four_without_creating_it(
+    cli_runner, tmp_path: Path
+):
+    config = AppConfig.default(tmp_path)
+    config.save(tmp_path / "config.json")
+    database_path = Path(config.data_dir) / "csindex.db"
+    assert not database_path.exists()
+    result = cli_runner(["status", "--json", "--root", str(tmp_path)])
+    assert result.exit_code == 4
+    assert not database_path.exists()
