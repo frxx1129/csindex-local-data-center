@@ -116,11 +116,20 @@ class CsindexClient:
 
     def fetch_yield(self, code: str) -> YieldSnapshot:
         safe_code = self._validate_code(code)
+
+        def parse_requested_yield(payload: object) -> YieldSnapshot:
+            snapshot = self.parse_yield(payload)
+            if snapshot.index_code != code:
+                raise ResponseFormatError(
+                    "yield response returned a different index code"
+                )
+            return snapshot
+
         return self._get_parsed(
             f"/perf/get-index-yield-item/{safe_code}",
             code,
             endpoint="yield",
-            parser=self.parse_yield,
+            parser=parse_requested_yield,
         )
 
     def fetch_volatility(self, code: str, data_date: str) -> VolatilitySnapshot:

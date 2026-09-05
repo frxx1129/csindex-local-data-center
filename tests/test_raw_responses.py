@@ -143,6 +143,28 @@ def test_client_records_schema_invalid_200_as_failure(monkeypatch) -> None:
     assert observed[0].is_success is False
 
 
+def test_client_records_wrong_index_code_as_failure(monkeypatch) -> None:
+    observed: list[RawResponse] = []
+    body = json.dumps(
+        {
+            "code": "200",
+            "data": {"indexCode": "999999", "endDate": "2026-09-03"},
+        }
+    ).encode()
+    monkeypatch.setattr(
+        "csindex_local.csindex_client.urlopen",
+        lambda request, timeout: FakeResponse(body),
+    )
+    client = CsindexClient("https://example.test", response_observer=observed.append)
+
+    with pytest.raises(ResponseFormatError, match="different index code"):
+        client.fetch_yield("000300")
+
+    assert observed[0].index_code == "000300"
+    assert observed[0].payload == body.decode()
+    assert observed[0].is_success is False
+
+
 def test_client_records_http_error_body_before_classification(monkeypatch) -> None:
     observed: list[RawResponse] = []
     body = b'{"message":"missing"}'
