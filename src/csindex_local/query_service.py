@@ -19,6 +19,10 @@ METRIC_FIELDS = (
     "three_year_volatility",
     "five_year_volatility",
 )
+_DATE_MISMATCH_ERROR_TEXTS = (
+    "data date mismatch",
+    "volatility response returned a different data date",
+)
 
 
 class QueryService:
@@ -156,7 +160,7 @@ class QueryService:
 
         for row in failed:
             message = row["last_error"] or "请求失败"
-            kind = "数据日期不一致" if "data date mismatch" in message else "请求失败"
+            kind = _failure_kind(message)
             result.append(
                 (
                     row["index_code"],
@@ -188,3 +192,11 @@ class QueryService:
             missing_count=int(row["missing_count"] if row["missing_count"] is not None else 9),
             is_complete=bool(row["is_complete"]),
         )
+
+
+def _failure_kind(message: str) -> str:
+    """Classify persisted legacy errors until failures have structured columns."""
+
+    if any(text in message for text in _DATE_MISMATCH_ERROR_TEXTS):
+        return "数据日期不一致"
+    return "请求失败"

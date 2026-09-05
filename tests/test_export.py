@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 from openpyxl import load_workbook
@@ -143,3 +144,54 @@ def test_export_uses_timestamped_path_when_target_is_locked(
     assert exported != target
     assert exported.exists()
     assert target.read_bytes() == b"original workbook remains untouched"
+
+
+def test_export_marks_volatility_date_mismatch_as_an_exception(
+    seed_database: Database, tmp_path: Path
+):
+    from csindex_local.excel_exporter import ExcelExporter
+
+    seed_database.create_or_get_scope("fixed:1", ["000905"])
+    with sqlite3.connect(seed_database.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO crawl_runs (
+                id, scope_type, scope_value, target_data_date, status, started_at,
+                total_tasks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-date-mismatch",
+                "fixed",
+                "1",
+                "2026-09-03",
+                "completed_with_failures",
+                "2026-09-03T00:00:00+00:00",
+                1,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO crawl_tasks (
+                run_id, index_code, endpoint, target_data_date, status, attempts,
+                available_at, last_error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-date-mismatch",
+                "000905",
+                "volatility",
+                "2026-09-03",
+                "failed",
+                1,
+                "2026-09-03T00:00:00+00:00",
+                "volatility response returned a different data date",
+                "2026-09-03T00:00:00+00:00",
+            ),
+        )
+
+    path = ExcelExporter(seed_database).export("fixed:1", tmp_path / "out.xlsx", 100)
+    issues = load_workbook(path, data_only=False)["缺失与异常"]
+
+    assert issues["D3"].value == "数据日期不一致"
+    assert issues["D3"].value != "请求失败"
