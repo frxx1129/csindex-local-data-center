@@ -258,7 +258,7 @@ class AppWindow:
 
     def _build_widgets(self) -> None:
         self.root.title("中证指数本地数据中心")
-        self.root.minsize(760, 520)
+        self.root.minsize(900, 520)
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
@@ -267,12 +267,21 @@ class AppWindow:
         frame.rowconfigure(_DETAILS_ROW, weight=1)
 
         ttk.Label(frame, text="抓取范围：").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(frame, textvariable=self.scope_var, values=("1000", "2000", "全部"), state="readonly", width=12).grid(row=0, column=1, sticky="w")
-        ttk.Label(frame, text="更新方式：").grid(row=0, column=2, sticky="w", padx=(18, 0))
-        ttk.Combobox(frame, textvariable=self.mode_var, values=("仅缺失", "更新当天", "强制刷新"), state="readonly", width=12).grid(row=0, column=3, sticky="w")
+        ttk.Combobox(
+            frame,
+            textvariable=self.scope_var,
+            values=("1000", "2000", "全部"),
+            state="normal",
+            width=12,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Label(frame, text="可手动输入任意正整数").grid(
+            row=0, column=2, sticky="w", padx=(8, 18)
+        )
+        ttk.Label(frame, text="更新方式：").grid(row=0, column=3, sticky="w")
+        ttk.Combobox(frame, textvariable=self.mode_var, values=("仅缺失", "更新当天", "强制刷新"), state="readonly", width=12).grid(row=0, column=4, sticky="w")
 
         actions = ttk.Frame(frame)
-        actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 10))
+        actions.grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 10))
         self.start_button = ttk.Button(actions, text="开始", command=self.start)
         self.pause_button = ttk.Button(actions, text="暂停", command=self.pause)
         self.resume_button = ttk.Button(actions, text="继续", command=self.resume)
@@ -281,14 +290,14 @@ class AppWindow:
         for button in (self.start_button, self.pause_button, self.resume_button, self.stop_button, self.export_button):
             button.pack(side="left", padx=(0, 8))
 
-        ttk.Label(frame, textvariable=self.status_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=2, column=0, columnspan=4, sticky="w")
+        ttk.Label(frame, textvariable=self.status_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=2, column=0, columnspan=5, sticky="w")
         self.progress = ttk.Progressbar(frame, orient="horizontal", mode="determinate")
-        self.progress.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 4))
-        ttk.Label(frame, textvariable=self.counts_var).grid(row=_COUNTS_ROW, column=0, columnspan=4, sticky="w")
-        ttk.Label(frame, textvariable=self.current_var).grid(row=_CURRENT_ROW, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.progress.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(8, 4))
+        ttk.Label(frame, textvariable=self.counts_var).grid(row=_COUNTS_ROW, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.current_var).grid(row=_CURRENT_ROW, column=0, columnspan=5, sticky="w", pady=(2, 0))
 
         details = ttk.Frame(frame)
-        details.grid(row=_DETAILS_ROW, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        details.grid(row=_DETAILS_ROW, column=0, columnspan=5, sticky="nsew", pady=(10, 0))
         details.columnconfigure(0, weight=1)
         details.rowconfigure(2, weight=1)
         ttk.Label(details, textvariable=self.cooldown_var).grid(row=0, column=0, sticky="w")
@@ -302,9 +311,13 @@ class AppWindow:
             return
         if self._worker is not None and self._worker.is_alive():
             return
+        try:
+            selection = _scope_selection(self.scope_var.get())
+        except ValueError as exc:
+            messagebox.showerror("范围输入错误", str(exc))
+            return
         self._control = CrawlControl()
         self.event_queue.put(_ui_event("ui_started", progress=RunProgress(0, 0, 0, 0)))
-        selection = _scope_selection(self.scope_var.get())
         mode = _mode_selection(self.mode_var.get())
         self._worker = threading.Thread(
             target=self._crawl_worker,
@@ -345,7 +358,11 @@ class AppWindow:
         if self._worker is not None and self._worker.is_alive():
             messagebox.showinfo("暂不可导出", "抓取进行中，请完成、停止或暂停到安全状态后再导出。")
             return
-        scope_id = _scope_id(self.scope_var.get())
+        try:
+            scope_id = _scope_id(self.scope_var.get())
+        except ValueError as exc:
+            messagebox.showerror("范围输入错误", str(exc))
+            return
         output = Path(self.services.config.export_dir) / f"{scope_id.replace(':', '_')}_one_year.xlsx"
         worker = threading.Thread(
             target=self._export_worker,
@@ -454,11 +471,17 @@ def _ui_event(kind: str, *, run_id: str = "", progress: RunProgress | None = Non
 
 
 def _scope_selection(value: str) -> ScopeSelection:
-    return ScopeSelection("all", 0) if value == "全部" else ScopeSelection("fixed_count", int(value))
+    normalized = value.strip()
+    if normalized.lower() in {"全部", "all"}:
+        return ScopeSelection("all", 0)
+    if not normalized.isdecimal() or int(normalized) < 1:
+        raise ValueError("抓取数量必须是正整数，或填写“全部”。")
+    return ScopeSelection("fixed_count", int(normalized))
 
 
 def _scope_id(value: str) -> str:
-    return "fixed:all" if value == "全部" else f"fixed:{int(value)}"
+    selection = _scope_selection(value)
+    return "fixed:all" if selection.kind == "all" else f"fixed:{selection.value}"
 
 
 def _mode_selection(value: str) -> UpdateMode:
