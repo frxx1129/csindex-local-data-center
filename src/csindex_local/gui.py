@@ -270,11 +270,11 @@ class AppWindow:
         ttk.Combobox(
             frame,
             textvariable=self.scope_var,
-            values=("1000", "2000", "全部"),
+            values=("20", "30", "1000", "2000"),
             state="normal",
             width=12,
         ).grid(row=0, column=1, sticky="w")
-        ttk.Label(frame, text="可手动输入任意正整数").grid(
+        ttk.Label(frame, text="可手动输入 0–2000").grid(
             row=0, column=2, sticky="w", padx=(8, 18)
         )
         ttk.Label(frame, text="更新方式：").grid(row=0, column=3, sticky="w")
@@ -315,6 +315,9 @@ class AppWindow:
             selection = _scope_selection(self.scope_var.get())
         except ValueError as exc:
             messagebox.showerror("范围输入错误", str(exc))
+            return
+        if selection.value == 0:
+            messagebox.showinfo("无需抓取", "抓取数量为 0，未向官网发送请求。")
             return
         self._control = CrawlControl()
         self.event_queue.put(_ui_event("ui_started", progress=RunProgress(0, 0, 0, 0)))
@@ -359,10 +362,14 @@ class AppWindow:
             messagebox.showinfo("暂不可导出", "抓取进行中，请完成、停止或暂停到安全状态后再导出。")
             return
         try:
-            scope_id = _scope_id(self.scope_var.get())
+            selection = _scope_selection(self.scope_var.get())
         except ValueError as exc:
             messagebox.showerror("范围输入错误", str(exc))
             return
+        if selection.value == 0:
+            messagebox.showinfo("无可导出数据", "抓取数量为 0，没有对应的导出范围。")
+            return
+        scope_id = f"fixed:{selection.value}"
         output = Path(self.services.config.export_dir) / f"{scope_id.replace(':', '_')}_one_year.xlsx"
         worker = threading.Thread(
             target=self._export_worker,
@@ -472,16 +479,17 @@ def _ui_event(kind: str, *, run_id: str = "", progress: RunProgress | None = Non
 
 def _scope_selection(value: str) -> ScopeSelection:
     normalized = value.strip()
-    if normalized.lower() in {"全部", "all"}:
-        return ScopeSelection("all", 0)
-    if not normalized.isdecimal() or int(normalized) < 1:
-        raise ValueError("抓取数量必须是正整数，或填写“全部”。")
-    return ScopeSelection("fixed_count", int(normalized))
+    if not normalized.isdecimal():
+        raise ValueError("抓取数量必须是 0 到 2000 的整数。")
+    count = int(normalized)
+    if count > 2000:
+        raise ValueError("抓取数量必须是 0 到 2000 的整数。")
+    return ScopeSelection("fixed_count", count)
 
 
 def _scope_id(value: str) -> str:
     selection = _scope_selection(value)
-    return "fixed:all" if selection.kind == "all" else f"fixed:{selection.value}"
+    return f"fixed:{selection.value}"
 
 
 def _mode_selection(value: str) -> UpdateMode:

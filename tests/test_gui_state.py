@@ -113,8 +113,8 @@ def test_dashboard_rows_do_not_overlap() -> None:
     assert _COUNTS_ROW < _CURRENT_ROW < _DETAILS_ROW
 
 
-@pytest.mark.parametrize("value,count", [("1", 1), ("1500", 1500), (" 2000 ", 2000)])
-def test_manual_positive_scope_is_accepted(value: str, count: int) -> None:
+@pytest.mark.parametrize("value,count", [("0", 0), ("1", 1), ("30", 30), ("1500", 1500), (" 2000 ", 2000)])
+def test_manual_scope_from_zero_to_2000_is_accepted(value: str, count: int) -> None:
     from csindex_local.gui import _scope_id, _scope_selection
 
     selection = _scope_selection(value)
@@ -124,17 +124,9 @@ def test_manual_positive_scope_is_accepted(value: str, count: int) -> None:
     assert _scope_id(value) == f"fixed:{count}"
 
 
-@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "一千"])
+@pytest.mark.parametrize("value", ["", "-1", "1.5", "一千", "2001", "9999", "全部", "all"])
 def test_invalid_manual_scope_has_clear_error(value: str) -> None:
     from csindex_local.gui import _scope_selection
 
-    with pytest.raises(ValueError, match="正整数"):
+    with pytest.raises(ValueError, match="0 到 2000"):
         _scope_selection(value)
-
-
-@pytest.mark.parametrize("value", ["全部", "all", "ALL"])
-def test_all_scope_aliases_are_accepted(value: str) -> None:
-    from csindex_local.gui import _scope_id, _scope_selection
-
-    assert _scope_selection(value).kind == "all"
-    assert _scope_id(value) == "fixed:all"
