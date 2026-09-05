@@ -93,14 +93,18 @@ class Crawler:
         self._database = database
         self._clock = clock or _utc_now
         self._queue = TaskQueue(database, clock=self._clock)
-        self._limiter = limiter or RateLimiter(
-            config=config,
-            clock=self._clock,
-            sleep=sleep,
-            random_uniform=random_uniform,
-            cooldown_state=self._load_cooldown_state(),
-            persist_cooldown_state=self._persist_cooldown_state,
-        )
+        if limiter is None:
+            self._limiter = RateLimiter(
+                config=config,
+                clock=self._clock,
+                sleep=sleep,
+                random_uniform=random_uniform,
+                cooldown_state=self._load_cooldown_state(),
+                persist_cooldown_state=self._persist_cooldown_state,
+            )
+        else:
+            self._limiter = limiter
+            self._bind_injected_limiter()
         if _DETAIL_WORKER_LOCK.acquire(blocking=False):
             try:
                 self._queue.recover_interrupted()
@@ -485,6 +489,21 @@ class Crawler:
         restore = getattr(self._limiter, "restore_cooldown_state", None)
         if callable(restore):
             restore(self._load_cooldown_state())
+
+    def _bind_injected_limiter(self) -> None:
+        add_callback = getattr(
+            self._limiter, "add_cooldown_state_persistence", None
+        )
+        if not callable(add_callback):
+            return
+        add_callback(self._persist_cooldown_state)
+        persisted = self._load_cooldown_state()
+        if persisted is not None:
+            self._limiter.restore_cooldown_state(persisted)
+            return
+        current = self._limiter.cooldown_state
+        if current is not None:
+            self._persist_cooldown_state(current)
 
     def _now(self) -> datetime:
         clock = self._clock

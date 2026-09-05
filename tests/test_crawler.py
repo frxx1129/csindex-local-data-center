@@ -770,6 +770,63 @@ def test_preconstructed_crawler_refreshes_cooldown_after_acquiring_worker_lock(
     assert database.get_runtime_state("waf_cooldown") is None
 
 
+def test_injected_limiter_persists_block_and_next_run_probes_before_work(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    original_persistence: list[object | None] = []
+    limiter = RateLimiter(
+        no_wait_config(),
+        clock=fake_clock.now,
+        sleep=fake_clock.sleep,
+        random_uniform=lambda minimum, maximum: 0,
+        persist_cooldown_state=original_persistence.append,
+    )
+    fake_client.queue("yield", "000905", BlockedError("injected blocked"))
+    crawler = Crawler(fake_client, database, limiter, clock=fake_clock.now)
+    run_id = crawler.prepare_run(
+        ScopeSelection("codes", ("000905", "000852")), UpdateMode.FORCE
+    )
+
+    crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    state = database.get_runtime_state("waf_cooldown")
+    assert state["next_cooldown_seconds"] == 3600
+    assert original_persistence[-1] is not None
+    calls_before_resume = len(fake_client.calls)
+
+    crawler.run(run_id, CrawlControl(), lambda event: None)
+
+    assert fake_clock.sleeps == [1800]
+    assert fake_client.calls[calls_before_resume] == ("yield", "000300")
+    assert fake_client.calls.count(("yield", "000852")) == 1
+    assert database.get_runtime_state("waf_cooldown") is None
+    assert original_persistence[-1] is None
+
+
+def test_injected_active_cooldown_is_persisted_before_empty_db_can_clear_it(
+    fake_client: FakeClient,
+    database: Database,
+    fake_clock: FakeClock,
+) -> None:
+    limiter = RateLimiter(
+        no_wait_config(),
+        clock=fake_clock.now,
+        sleep=fake_clock.sleep,
+        random_uniform=lambda minimum, maximum: 0,
+    )
+    limiter.enter_blocked_cooldown(fake_clock.now())
+    assert database.get_runtime_state("waf_cooldown") is None
+
+    crawler = Crawler(fake_client, database, limiter, clock=fake_clock.now)
+    crawler.prepare_run(ScopeSelection("fixed_count", 1), UpdateMode.UPDATE)
+
+    assert fake_clock.sleeps == [1800]
+    assert fake_client.calls.count(("yield", "000300")) == 1
+    assert database.get_runtime_state("waf_cooldown") is None
+
+
 def test_events_have_stable_frozen_shape(
     fake_client: FakeClient,
     database: Database,

@@ -67,6 +67,7 @@ class RateLimiter:
         self._random_uniform = random_uniform
         self._persist_cooldown = persist_cooldown
         self._persist_cooldown_state = persist_cooldown_state
+        self._additional_cooldown_state_callbacks: list[PersistCooldownState] = []
 
         self._request_count = 0
         self._next_request_at: datetime | None = None
@@ -149,10 +150,9 @@ class RateLimiter:
         )
         if self._persist_cooldown is not None:
             self._persist_cooldown(self._blocked_until)
-        if self._persist_cooldown_state is not None:
-            self._persist_cooldown_state(
-                CooldownState(self._blocked_until, self._next_blocked_seconds)
-            )
+        self._notify_cooldown_state(
+            CooldownState(self._blocked_until, self._next_blocked_seconds)
+        )
         return self._blocked_until
 
     def clear_blocked_cooldown(self) -> None:
@@ -163,13 +163,28 @@ class RateLimiter:
         )
         if self._persist_cooldown is not None:
             self._persist_cooldown(None)
-        if self._persist_cooldown_state is not None:
-            self._persist_cooldown_state(None)
+        self._notify_cooldown_state(None)
 
     @property
     def blocked_until(self) -> datetime | None:
         """Return the currently persisted/active WAF deadline, if any."""
         return self._blocked_until
+
+    @property
+    def cooldown_state(self) -> CooldownState | None:
+        """Return the complete in-memory WAF state without mutating it."""
+        if self._blocked_until is None:
+            return None
+        return CooldownState(self._blocked_until, self._next_blocked_seconds)
+
+    def add_cooldown_state_persistence(
+        self, callback: PersistCooldownState
+    ) -> None:
+        """Append a state callback while preserving constructor callbacks."""
+        if callback == self._persist_cooldown_state:
+            return
+        if callback not in self._additional_cooldown_state_callbacks:
+            self._additional_cooldown_state_callbacks.append(callback)
 
     def restore_cooldown_state(self, state: CooldownState | None) -> None:
         """Replace local WAF state from the authoritative persistent store.
@@ -188,6 +203,12 @@ class RateLimiter:
             raise TypeError("state must be CooldownState or None")
         self._blocked_until = self._as_aware(state.until)
         self._next_blocked_seconds = float(state.next_cooldown_seconds)
+
+    def _notify_cooldown_state(self, state: CooldownState | None) -> None:
+        if self._persist_cooldown_state is not None:
+            self._persist_cooldown_state(state)
+        for callback in tuple(self._additional_cooldown_state_callbacks):
+            callback(state)
 
     def _now(self) -> datetime:
         clock = self._clock
