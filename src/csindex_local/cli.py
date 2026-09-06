@@ -71,7 +71,9 @@ def _source_root() -> Path:
     # PyInstaller-style ``sys.frozen`` flag.  ``__file__`` points into its
     # temporary extraction directory, so packaged builds must use the real
     # executable location.
-    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+    executable_name = Path(sys.executable).name.casefold()
+    running_from_python = executable_name in {"python.exe", "pythonw.exe", "py.exe"}
+    if getattr(sys, "frozen", False) or not running_from_python or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
     # cli.py lives below <project>/src/csindex_local.
     return Path(__file__).resolve().parents[2]

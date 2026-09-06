@@ -76,6 +76,7 @@ $DistRoot = Join-Path $ProjectPath "dist"
 $ReleaseRoot = Join-Path $ProjectPath "release"
 $AppName = Decode-Utf8 "5Lit6K+B5oyH5pWw5pys5Zyw5pWw5o2u5Lit5b+D"
 $ReleaseAppRoot = Join-Path $ReleaseRoot $AppName
+$ZipPath = Join-Path $ReleaseRoot "$AppName.zip"
 $ExeName = Decode-Utf8 "5Lit6K+B5oyH5pWw5pys5Zyw5pWw5o2u5Lit5b+DLmV4ZQ=="
 $ExePath = Join-Path $DistRoot $ExeName
 
@@ -139,6 +140,10 @@ Copy-Item -LiteralPath $BuiltExe -Destination $ExePath -Force
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $ReleaseAppRoot $ExeName) -Force
 Copy-Item -LiteralPath (Join-Path $ProjectPath "README.md") -Destination $ReleaseAppRoot -Force
 Copy-Item -LiteralPath (Join-Path $ProjectPath "config.example.json") -Destination $ReleaseAppRoot -Force
+if (Test-Path -LiteralPath $ZipPath) {
+    Remove-Item -LiteralPath $ZipPath -Force
+}
+Compress-Archive -LiteralPath $ReleaseAppRoot -DestinationPath $ZipPath -CompressionLevel Optimal
 
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $ExePath
 $Size = (Get-Item -LiteralPath $ExePath).Length
@@ -146,3 +151,4 @@ Write-Host "Built: $ExePath"
 Write-Host "Size: $Size bytes"
 Write-Host "SHA256: $($Hash.Hash)"
 Write-Host "Release: $ReleaseAppRoot"
+Write-Host "ZIP: $ZipPath"

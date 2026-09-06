@@ -111,6 +111,13 @@ def test_nuitka_build_uses_real_executable_directory(monkeypatch: pytest.MonkeyP
     assert cli._source_root() == Path(r"E:\apps\csindex")
 
 
+def test_non_python_executable_uses_real_executable_directory(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delattr(cli, "__compiled__", raising=False)
+    monkeypatch.setattr(cli.sys, "executable", r"E:\apps\csindex\csindex.exe")
+
+    assert cli._source_root() == Path(r"E:\apps\csindex")
+
+
 def test_c_drive_config_directories_are_rejected(cli_runner, tmp_path: Path):
     config = AppConfig.default(tmp_path)
     config.data_dir = r"C:\csindex-local-data"
